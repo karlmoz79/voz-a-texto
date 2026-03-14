@@ -1,0 +1,14 @@
+{
+  "name": "voice-to-text-app",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c red,cyan \"npm:dev --workspace backend\" \"npm:dev --workspace frontend\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
