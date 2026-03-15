@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 const TARGET_SAMPLE_RATE = 16000;
 const CHUNK_SAMPLES = 320; // 20ms @ 16kHz
 const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_BASE_DELAY_MS = 1000;
+const NATIVE_FLUSH_INTERVAL_MS = 120;
+const WAVE_BARS = Array.from({ length: 13 }, (_, i) => i);
 
 function resampleFloat32(input: Float32Array, inRate: number, outRate: number) {
   if (inRate === outRate) return input;
@@ -38,6 +40,30 @@ function pcm16ToBase64(pcm: Int16Array) {
   return btoa(binary);
 }
 
+function appendOnlyDelta(current: string, desired: string) {
+  if (!desired) {
+    return { append: "", nextTyped: current };
+  }
+  if (!current) {
+    return { append: desired, nextTyped: desired };
+  }
+  if (desired.startsWith(current)) {
+    return { append: desired.slice(current.length), nextTyped: desired };
+  }
+
+  const maxOverlap = Math.min(current.length, desired.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    if (current.slice(-overlap) === desired.slice(0, overlap)) {
+      const append = desired.slice(overlap);
+      return { append, nextTyped: current + append };
+    }
+  }
+
+  const needsSpace = !current.endsWith(" ") && !desired.startsWith(" ");
+  const append = needsSpace ? ` ${desired}` : desired;
+  return { append, nextTyped: current + append };
+}
+
 export default function App() {
   const [status, setStatus] = useState("Idle");
   const [language, setLanguage] = useState("es");
@@ -45,33 +71,154 @@ export default function App() {
   const [finals, setFinals] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [recording, setRecording] = useState(false);
-  const [nativeTyping, setNativeTyping] = useState(false);
+  const [nativeTyping, setNativeTyping] = useState(true);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const pendingSamplesRef = useRef<number[]>([]);
+  const nativeTypingRef = useRef(false);
+  const nativeDesiredRef = useRef("");
+  const nativeSessionTextRef = useRef("");
+  const nativeInFlightRef = useRef(false);
+  const nativeCommitPendingRef = useRef(false);
+  const nativeAfterCommitRef = useRef<string | null>(null);
+  const nativeStopPendingRef = useRef(false);
+  const nativeFlushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const mergedTranscript = useMemo(() => finals.join(" "), [finals]);
+  const showWave = recording && status !== "Error" && !status.includes("Procesando");
 
-  const sendNativeText = useCallback(async (text: string) => {
+  const sendNativeText = useCallback(async (
+    text: string,
+    backspaces = 0,
+    appendSpace = false,
+    delayMs = 1
+  ) => {
     try {
+      if (!text && backspaces <= 0) return true;
       const res = await fetch("/api/native/type", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text })
+        body: JSON.stringify({
+          text,
+          backspaces,
+          appendSpace,
+          delayMs
+        })
       });
       if (!res.ok) {
         const data = await res.json().catch(() => null);
         setError(data?.error || "No se pudo enviar texto a la ventana activa");
+        return false;
       }
+      return true;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Error al enviar texto a la ventana activa");
+      return false;
     }
   }, []);
+
+
+  const resetNativeBuffer = useCallback(() => {
+    nativeDesiredRef.current = "";
+    nativeSessionTextRef.current = "";
+    nativeCommitPendingRef.current = false;
+    nativeInFlightRef.current = false;
+    nativeAfterCommitRef.current = null;
+    nativeStopPendingRef.current = false;
+    if (nativeFlushTimeoutRef.current) {
+      clearTimeout(nativeFlushTimeoutRef.current);
+      nativeFlushTimeoutRef.current = null;
+    }
+  }, []);
+
+  const flushNative = async () => {
+    if (!nativeTypingRef.current || nativeInFlightRef.current) return;
+    const desired = nativeDesiredRef.current;
+    const current = nativeSessionTextRef.current;
+    const commit = nativeCommitPendingRef.current;
+
+    if (desired === current && !commit) return;
+    const { append, nextTyped } = appendOnlyDelta(current, desired);
+    if (!append) {
+      if (commit) {
+        nativeCommitPendingRef.current = false;
+        if (nativeAfterCommitRef.current) {
+          nativeDesiredRef.current = nativeAfterCommitRef.current;
+          nativeAfterCommitRef.current = null;
+          scheduleNativeFlush();
+        }
+      }
+      return;
+    }
+
+    const desiredAtSend = desired;
+    nativeInFlightRef.current = true;
+    try {
+      const ok = await sendNativeText(append, 0, false, 1);
+      if (ok) {
+        nativeSessionTextRef.current = nextTyped;
+        if (commit) {
+          nativeCommitPendingRef.current = false;
+          if (nativeAfterCommitRef.current) {
+            nativeDesiredRef.current = nativeAfterCommitRef.current;
+            nativeAfterCommitRef.current = null;
+            scheduleNativeFlush();
+          }
+        }
+      }
+    } finally {
+      nativeInFlightRef.current = false;
+      if (nativeCommitPendingRef.current || nativeDesiredRef.current !== desiredAtSend) {
+        scheduleNativeFlush();
+      }
+      if (
+        nativeStopPendingRef.current &&
+        !nativeInFlightRef.current &&
+        !nativeCommitPendingRef.current &&
+        nativeDesiredRef.current === nativeSessionTextRef.current
+      ) {
+        resetNativeBuffer();
+      }
+    }
+  };
+
+  const scheduleNativeFlush = () => {
+    if (!nativeTypingRef.current) return;
+    if (nativeFlushTimeoutRef.current) return;
+    nativeFlushTimeoutRef.current = setTimeout(() => {
+      nativeFlushTimeoutRef.current = null;
+      void flushNative();
+    }, NATIVE_FLUSH_INTERVAL_MS);
+  };
+
+  const queueNativeText = (text: string, commit = false) => {
+    if (!nativeTypingRef.current) return;
+    if (!commit && !text) return;
+    if (commit) {
+      if (!text) {
+        nativeDesiredRef.current = "";
+        nativeCommitPendingRef.current = false;
+        nativeAfterCommitRef.current = null;
+        return;
+      }
+      const finalText = /\s$/.test(text) ? text : `${text} `;
+      nativeDesiredRef.current = finalText;
+      nativeCommitPendingRef.current = true;
+      void flushNative();
+      return;
+    }
+    if (nativeCommitPendingRef.current) {
+      nativeAfterCommitRef.current = text;
+      return;
+    }
+    nativeDesiredRef.current = text;
+    scheduleNativeFlush();
+  };
 
   const stopSession = useCallback(() => {
     if (reconnectTimeoutRef.current) {
@@ -97,9 +244,14 @@ export default function App() {
     audioContextRef.current = null;
 
     pendingSamplesRef.current = [];
+    if (nativeTypingRef.current && (nativeInFlightRef.current || nativeCommitPendingRef.current)) {
+      nativeStopPendingRef.current = true;
+    } else {
+      resetNativeBuffer();
+    }
     setStatus("Detenido");
     setRecording(false);
-  }, []);
+  }, [resetNativeBuffer]);
 
   const finishAndTranscribe = useCallback(() => {
     // Apagar micrófono visualmente
@@ -135,6 +287,13 @@ export default function App() {
       stopSession();
     };
   }, [stopSession]);
+
+  useEffect(() => {
+    nativeTypingRef.current = nativeTyping;
+    if (!nativeTyping) {
+      resetNativeBuffer();
+    }
+  }, [nativeTyping, resetNativeBuffer]);
 
   const startSession = async () => {
     if (wsRef.current) return;
@@ -198,16 +357,15 @@ export default function App() {
         }
 
         if (msg.type === "partial_transcript") {
-          setPartials(msg.text || "");
+          const text = typeof msg.text === "string" ? msg.text : "";
+          setPartials(text);
           setStatus("Transcribiendo...");
         }
 
         if (msg.type === "final_transcript") {
           if (msg.text) {
             setFinals((prev) => [...prev, msg.text as string]);
-            if (nativeTyping) {
-              void sendNativeText(msg.text as string);
-            }
+            queueNativeText(msg.text as string, true);
           }
           setPartials("");
           // Si el micrófono está apagado, significa que se llamó a finishAndTranscribe
@@ -327,9 +485,18 @@ export default function App() {
           <h1>Voz a Texto</h1>
           <p>Transcripción en tiempo real con Gemini Multimodal Live</p>
         </div>
-        <div className={`status ${statusClass}`}>
-          <span>Estado</span>
-          <strong>{status}</strong>
+        <div className="status-stack">
+          <div className={`status ${statusClass}`}>
+            <span>Estado</span>
+            <strong>{status}</strong>
+          </div>
+          {showWave && (
+            <div className="voice-wave" aria-hidden="true">
+              {WAVE_BARS.map((index) => (
+                <span key={index} style={{ "--i": index } as CSSProperties} />
+              ))}
+            </div>
+          )}
         </div>
       </header>
 

@@ -67,8 +67,20 @@ app.post("/api/native/type", (req, res) => {
     res.status(400).json({ error: "Native typing only supported on Linux" });
     return;
   }
-  const { text, appendSpace = true } = req.body || {};
-  if (typeof text !== "string" || text.trim().length === 0) {
+  const {
+    text = "",
+    appendSpace = true,
+    backspaces = 0,
+    delayMs = 1
+  } = req.body || {};
+  const normalizedBackspaces = Number.isFinite(backspaces)
+    ? Math.max(0, Math.min(2000, Math.floor(backspaces)))
+    : 0;
+  const normalizedDelayMs = Number.isFinite(delayMs)
+    ? Math.max(0, Math.min(25, Math.floor(delayMs)))
+    : 1;
+
+  if (typeof text !== "string") {
     res.status(400).json({ error: "Missing text" });
     return;
   }
@@ -76,13 +88,27 @@ app.post("/api/native/type", (req, res) => {
     res.status(400).json({ error: "Text too long" });
     return;
   }
+  if (text.trim().length === 0 && normalizedBackspaces === 0) {
+    res.status(400).json({ error: "Missing text" });
+    return;
+  }
 
-  const finalText = appendSpace ? `${text} ` : text;
-  const child = spawn(
-    NATIVE_TYPE_CMD,
-    ["type", "--clearmodifiers", "--delay", "1", "--", finalText],
-    { stdio: "ignore" }
-  );
+  const finalText = text.length > 0
+    ? (appendSpace ? `${text} ` : text)
+    : "";
+  const args = [];
+  if (normalizedBackspaces > 0) {
+    args.push("key", "--clearmodifiers", "--repeat", String(normalizedBackspaces), "BackSpace");
+  }
+  if (finalText.length > 0) {
+    args.push("type", "--clearmodifiers", "--delay", String(normalizedDelayMs), "--", finalText);
+  }
+  if (args.length === 0) {
+    res.json({ ok: true });
+    return;
+  }
+
+  const child = spawn(NATIVE_TYPE_CMD, args, { stdio: "ignore" });
 
   let responded = false;
   child.on("error", (err) => {
