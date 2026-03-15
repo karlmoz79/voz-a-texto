@@ -5,6 +5,9 @@ const CHUNK_SAMPLES = 320; // 20ms @ 16kHz
 const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_BASE_DELAY_MS = 1000;
 const NATIVE_FLUSH_INTERVAL_MS = 120;
+const SILENCE_THRESHOLD = 0.008;
+const AUTO_SILENCE_MS = 4000;
+const MAX_PENDING_SAMPLES = Math.floor(TARGET_SAMPLE_RATE * 0.5);
 const WAVE_BARS = Array.from({ length: 13 }, (_, i) => i);
 
 function resampleFloat32(input: Float32Array, inRate: number, outRate: number) {
@@ -88,6 +91,10 @@ export default function App() {
   const nativeFlushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const canSendAudioRef = useRef(true);
+  const autoCommitInFlightRef = useRef(false);
+  const lastVoiceAtRef = useRef(Date.now());
+  const restartInFlightRef = useRef(false);
 
   const mergedTranscript = useMemo(() => finals.join(" "), [finals]);
   const showWave = recording && status !== "Error" && !status.includes("Procesando");
@@ -244,6 +251,9 @@ export default function App() {
     audioContextRef.current = null;
 
     pendingSamplesRef.current = [];
+    canSendAudioRef.current = true;
+    autoCommitInFlightRef.current = false;
+    restartInFlightRef.current = false;
     if (nativeTypingRef.current && (nativeInFlightRef.current || nativeCommitPendingRef.current)) {
       nativeStopPendingRef.current = true;
     } else {
@@ -295,12 +305,27 @@ export default function App() {
     }
   }, [nativeTyping, resetNativeBuffer]);
 
+  const sendStartMessage = useCallback(() => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(
+      JSON.stringify({
+        type: "start",
+        config: { language, vad: "none" }
+      })
+    );
+  }, [language]);
+
   const startSession = async () => {
     if (wsRef.current) return;
     setError(null);
     setStatus("Creando sesión...");
     setPartials("");
     setFinals([]);
+    canSendAudioRef.current = true;
+    autoCommitInFlightRef.current = false;
+    restartInFlightRef.current = false;
+    lastVoiceAtRef.current = Date.now();
 
     const res = await fetch("/api/realtime/session", { method: "POST" });
     if (!res.ok) {
@@ -318,12 +343,7 @@ export default function App() {
       ws.onopen = async () => {
         reconnectAttemptsRef.current = 0;
         setStatus("Conectado, iniciando audio...");
-        ws.send(
-          JSON.stringify({
-            type: "start",
-            config: { language, vad: "none" }
-          })
-        );
+        sendStartMessage();
         try {
           setStatus("Solicitando permiso de micrófono...");
           await startAudio();
@@ -344,6 +364,9 @@ export default function App() {
           if (msg.state === "listening" || msg.state === "connected") {
             setStatus("Escuchando...");
             setRecording(true);
+            canSendAudioRef.current = true;
+            autoCommitInFlightRef.current = false;
+            restartInFlightRef.current = false;
           }
           if (msg.state === "processing") setStatus("Procesando transcripción...");
           if (msg.state === "openai_closed" || msg.state === "gemini_closed") {
@@ -368,9 +391,11 @@ export default function App() {
             queueNativeText(msg.text as string, true);
           }
           setPartials("");
-          // Si el micrófono está apagado, significa que se llamó a finishAndTranscribe
           if (!workletNodeRef.current) {
             stopSession();
+          } else if (autoCommitInFlightRef.current) {
+            setStatus("En pausa por silencio...");
+            canSendAudioRef.current = false;
           } else {
             setStatus("Escuchando...");
           }
@@ -431,13 +456,44 @@ export default function App() {
       const input = event.data as Float32Array;
       const resampled = resampleFloat32(input, audioContext.sampleRate, TARGET_SAMPLE_RATE);
       const pcm16 = floatToPCM16(resampled);
+      let rms = 0;
+      for (let i = 0; i < resampled.length; i += 1) {
+        const v = resampled[i];
+        rms += v * v;
+      }
+      rms = Math.sqrt(rms / Math.max(1, resampled.length));
+      const now = Date.now();
+      if (rms >= SILENCE_THRESHOLD) {
+        lastVoiceAtRef.current = now;
+        if (!canSendAudioRef.current && !restartInFlightRef.current) {
+          restartInFlightRef.current = true;
+          autoCommitInFlightRef.current = false;
+          setStatus("Reanudando...");
+          sendStartMessage();
+        }
+      } else if (
+        canSendAudioRef.current &&
+        !autoCommitInFlightRef.current &&
+        now - lastVoiceAtRef.current > AUTO_SILENCE_MS
+      ) {
+        autoCommitInFlightRef.current = true;
+        canSendAudioRef.current = false;
+        const ws = wsRef.current;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "commit" }));
+          setStatus("Procesando transcripción...");
+        }
+      }
 
       const pending = pendingSamplesRef.current;
       for (let i = 0; i < pcm16.length; i += 1) {
         pending.push(pcm16[i]);
       }
+      if (pending.length > MAX_PENDING_SAMPLES) {
+        pending.splice(0, pending.length - MAX_PENDING_SAMPLES);
+      }
 
-      while (pending.length >= CHUNK_SAMPLES) {
+      while (pending.length >= CHUNK_SAMPLES && canSendAudioRef.current) {
         const chunk = new Int16Array(CHUNK_SAMPLES);
         for (let i = 0; i < CHUNK_SAMPLES; i += 1) {
           chunk[i] = pending.shift() as number;

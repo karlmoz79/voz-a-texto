@@ -163,6 +163,7 @@ wss.on("connection", (clientWs, req) => {
   let closed = false;
   let idleInterval = null;
   let audioQueue = [];
+  let closeAfterCommit = false;
 
   const sendToClient = (payload) => {
     if (clientWs.readyState === WebSocket.OPEN) {
@@ -225,6 +226,7 @@ wss.on("connection", (clientWs, req) => {
     geminiWs.on("open", () => {
       sessionActive = true;
       setupComplete = false;
+      closeAfterCommit = false;
       sendToClient({ type: "status", state: "connected" }); // Updated to connected
 
       // Phase 1: Setup (BidiGenerateContent)
@@ -307,6 +309,14 @@ wss.on("connection", (clientWs, req) => {
             sendToClient({ type: "final_transcript", text: currentTurnText });
             currentTurnText = "";
             sendToClient({ type: "partial_transcript", text: "" });
+            if (closeAfterCommit) {
+              closeAfterCommit = false;
+              try {
+                geminiWs?.close(1000, "commit_complete");
+              } catch (_err) {
+                // ignore
+              }
+            }
           }
         }
 
@@ -319,6 +329,14 @@ wss.on("connection", (clientWs, req) => {
               currentTurnText = "";
             }
             sendToClient({ type: "partial_transcript", text: "" });
+            if (closeAfterCommit) {
+              closeAfterCommit = false;
+              try {
+                geminiWs?.close(1000, "commit_complete");
+              } catch (_err) {
+                // ignore
+              }
+            }
           }
         }
 
@@ -333,6 +351,9 @@ wss.on("connection", (clientWs, req) => {
 
     geminiWs.on("close", (code, reason) => {
       sessionActive = false;
+      setupComplete = false;
+      geminiWs = null;
+      audioQueue = [];
       sendToClient({ type: "status", state: "gemini_closed" });
       if (code && code !== 1000) {
         const detail = reason ? ` (${reason.toString()})` : "";
@@ -412,6 +433,7 @@ wss.on("connection", (clientWs, req) => {
             audioStreamEnd: true
           }
         }));
+        closeAfterCommit = true;
         sendToClient({ type: "status", state: "processing" });
       }
       return;
