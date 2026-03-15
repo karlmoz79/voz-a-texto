@@ -1,10 +1,10 @@
 # AGENTS.md - Voz a Texto en Tiempo Real
 
 ## Resumen del proyecto
-- Objetivo: App web que captura micrófono y transcribe en tiempo real usando OpenAI Realtime (transcripción).
-- Características Modulares: Transmisión en tiempo real al WebSocket, opción de pausar acumulación en el Frontend para procesar por lotes, y exportación local de archivos con transcripción (.txt).
+- Objetivo: App web que captura micrófono y transcribe en tiempo real usando Gemini Live (BidiGenerateContent).
+- Características Modulares: Transmisión en tiempo real al WebSocket, finalización de stream con "Procesar" (commit) y exportación local de archivos con transcripción (.txt). Dictado nativo opcional en Linux.
 - Stack: Backend Node.js (Express + ws) y Frontend React + Vite + TypeScript.
-- Version minima: Node.js 18+, npm 8+.
+- Versión mínima: Node.js 18+, npm 8+.
 
 ## Setup y desarrollo
 - Instalar dependencias: `npm install` (raíz). Se configuran espacios de trabajo (workspaces).
@@ -19,7 +19,7 @@
 
 ## Convenciones de codigo
 - Lenguaje/estilo: JS ESM en backend; TypeScript/React en frontend; mantener código simple y explícito, respetando arquitecturas funcionales y de hooks en React.
-- Arquitectura: puente WebSocket en backend controlando flujos de OpenAI, ratelimits, e integraciones; Frontend con UI minimalista que captura audio en PCM16 a 24kHz usando AudioContext y AudioWorklets.
+- Arquitectura: puente WebSocket en backend controlando flujos de Gemini, ratelimits, cola de audio hasta `setupComplete`, y dictado nativo; Frontend con UI minimalista que captura audio PCM16 a 16kHz usando AudioContext + AudioWorklets, resampleo y chunks base64.
 - Evitar: incluir secretos, cambiar APIs sin actualizar la documentación pertinente como `README.md`/`AGENTS.md`.
 
 ## Reglas de cambios

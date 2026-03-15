@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-const TARGET_SAMPLE_RATE = 24000;
-const CHUNK_SAMPLES = 480; // 20ms @ 24kHz
+const TARGET_SAMPLE_RATE = 16000;
+const CHUNK_SAMPLES = 320; // 20ms @ 16kHz
 const MAX_RECONNECT_ATTEMPTS = 3;
 const RECONNECT_BASE_DELAY_MS = 1000;
 
@@ -40,12 +40,12 @@ function pcm16ToBase64(pcm: Int16Array) {
 
 export default function App() {
   const [status, setStatus] = useState("Idle");
-  const [isPaused, setIsPaused] = useState(false);
-  const isPausedRef = useRef(false);
   const [language, setLanguage] = useState("es");
   const [partials, setPartials] = useState("");
   const [finals, setFinals] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [recording, setRecording] = useState(false);
+  const [nativeTyping, setNativeTyping] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -57,47 +57,23 @@ export default function App() {
 
   const mergedTranscript = useMemo(() => finals.join(" "), [finals]);
 
-  const pauseSession = useCallback(() => {
-    isPausedRef.current = true;
-    setIsPaused(true);
-    setStatus("Pausado - clickea procesar");
-  }, []);
-
-  const processAndResume = useCallback(() => {
-    const ws = wsRef.current;
-    
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      const pending = pendingSamplesRef.current;
-      
-      while (pending.length >= CHUNK_SAMPLES) {
-        const chunk = new Int16Array(CHUNK_SAMPLES);
-        for (let i = 0; i < CHUNK_SAMPLES; i += 1) {
-          chunk[i] = pending.shift() as number;
-        }
-        ws.send(JSON.stringify({ type: "audio_chunk", audio: pcm16ToBase64(chunk) }));
+  const sendNativeText = useCallback(async (text: string) => {
+    try {
+      const res = await fetch("/api/native/type", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text })
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        setError(data?.error || "No se pudo enviar texto a la ventana activa");
       }
-      
-      if (pending.length > 0) {
-        const chunk = new Int16Array(pending.length);
-        for (let i = 0; i < pending.length; i += 1) {
-          chunk[i] = pending[i] as number;
-        }
-        pending.length = 0;
-        ws.send(JSON.stringify({ type: "audio_chunk", audio: pcm16ToBase64(chunk) }));
-      }
-      
-      ws.send(JSON.stringify({ type: "commit" }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Error al enviar texto a la ventana activa");
     }
-    
-    isPausedRef.current = false;
-    setIsPaused(false);
-    setStatus("Escuchando...");
   }, []);
 
   const stopSession = useCallback(() => {
-    isPausedRef.current = false;
-    setIsPaused(false);
-
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
@@ -121,8 +97,38 @@ export default function App() {
     audioContextRef.current = null;
 
     pendingSamplesRef.current = [];
-    setStatus("Stopped");
+    setStatus("Detenido");
+    setRecording(false);
   }, []);
+
+  const finishAndTranscribe = useCallback(() => {
+    // Apagar micrófono visualmente
+    workletNodeRef.current?.disconnect();
+    workletNodeRef.current = null;
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    mediaStreamRef.current = null;
+    audioContextRef.current?.close();
+    audioContextRef.current = null;
+    setRecording(false);
+
+    // Enviar pendientes y comando commit al backend
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      const pending = pendingSamplesRef.current;
+      if (pending.length > 0) {
+        const chunk = new Int16Array(pending.length);
+        for (let i = 0; i < pending.length; i += 1) {
+          chunk[i] = pending[i] as number;
+        }
+        pending.length = 0;
+        ws.send(JSON.stringify({ type: "audio_chunk", audio: pcm16ToBase64(chunk) }));
+      }
+      ws.send(JSON.stringify({ type: "commit" }));
+      setStatus("Procesando transcripción...");
+    } else {
+      stopSession();
+    }
+  }, [stopSession]);
 
   useEffect(() => {
     return () => {
@@ -163,18 +169,28 @@ export default function App() {
           setStatus("Solicitando permiso de micrófono...");
           await startAudio();
           setStatus("Escuchando...");
+          setRecording(true);
         } catch (err) {
           setError("Permiso de micrófono denegado o no disponible");
           setStatus("Error");
+          setRecording(false);
         }
       };
 
       ws.onmessage = (event) => {
-        let msg: { type?: string; text?: string; message?: string; state?: string } = {};
-        try {
-          msg = JSON.parse(event.data);
-        } catch (_err) {
-          return;
+        const msg = JSON.parse(event.data);
+        console.log("WebSocket event:", msg);
+
+        if (msg.type === "status") {
+          if (msg.state === "listening" || msg.state === "connected") {
+            setStatus("Escuchando...");
+            setRecording(true);
+          }
+          if (msg.state === "processing") setStatus("Procesando transcripción...");
+          if (msg.state === "openai_closed" || msg.state === "gemini_closed") {
+            setStatus("Sesión cerrada");
+            setRecording(false);
+          }
         }
 
         if (msg.type === "speech_started") {
@@ -189,18 +205,26 @@ export default function App() {
         if (msg.type === "final_transcript") {
           if (msg.text) {
             setFinals((prev) => [...prev, msg.text as string]);
-            setPartials("");
+            if (nativeTyping) {
+              void sendNativeText(msg.text as string);
+            }
+          }
+          setPartials("");
+          // Si el micrófono está apagado, significa que se llamó a finishAndTranscribe
+          if (!workletNodeRef.current) {
+            stopSession();
+          } else {
             setStatus("Escuchando...");
           }
         }
 
-        if (msg.type === "status") {
-          if (msg.state === "listening" || msg.state === "openai_connected") setStatus("Escuchando...");
-          if (msg.state === "openai_closed") setStatus("Cerrado");
-          if (msg.state === "idle_timeout") setStatus("Tiempo de inactividad agotado");
-        }
-
         if (msg.type === "error") {
+          if (msg.message && msg.message.includes("buffer too small")) {
+            if (!workletNodeRef.current) {
+              stopSession();
+            }
+            return;
+          }
           setError(msg.message || "Error");
           setStatus("Error");
         }
@@ -221,6 +245,7 @@ export default function App() {
             connectWebSocket(attempt + 1);
           }, delay);
         } else {
+          // If already in 'Procesando...', we let it finish or error, otherwise:
           setStatus("Detenido");
         }
       };
@@ -254,14 +279,12 @@ export default function App() {
         pending.push(pcm16[i]);
       }
 
-      if (!isPausedRef.current) {
-        while (pending.length >= CHUNK_SAMPLES) {
-          const chunk = new Int16Array(CHUNK_SAMPLES);
-          for (let i = 0; i < CHUNK_SAMPLES; i += 1) {
-            chunk[i] = pending.shift() as number;
-          }
-          sendAudioChunk(chunk);
+      while (pending.length >= CHUNK_SAMPLES) {
+        const chunk = new Int16Array(CHUNK_SAMPLES);
+        for (let i = 0; i < CHUNK_SAMPLES; i += 1) {
+          chunk[i] = pending.shift() as number;
         }
+        sendAudioChunk(chunk);
       }
     };
 
@@ -282,9 +305,9 @@ export default function App() {
     );
   };
 
-  const statusClass = status === "Error" ? "status-error" 
-    : status.includes("Escuchando") || status.includes("Hablando") || status.includes("Transcribiendo") || status.includes("Procesando") 
-      ? "status-listening" 
+  const statusClass = status === "Error" ? "status-error"
+    : status.includes("Escuchando") || status.includes("Hablando") || status.includes("Transcribiendo") || status.includes("Procesando")
+      ? "status-listening"
       : "";
 
   const exportTranscript = () => {
@@ -302,7 +325,7 @@ export default function App() {
       <header className="header">
         <div>
           <h1>Voz a Texto</h1>
-          <p>Transcripción en tiempo real con OpenAI Realtime + Whisper</p>
+          <p>Transcripción en tiempo real con Gemini Multimodal Live</p>
         </div>
         <div className={`status ${statusClass}`}>
           <span>Estado</span>
@@ -313,26 +336,35 @@ export default function App() {
       <section className="controls">
         <label>
           Idioma
-          <select value={language} onChange={(e) => setLanguage(e.target.value)}>
+          <select value={language} onChange={(e) => setLanguage(e.target.value)} disabled={!!wsRef.current}>
             <option value="es">Español</option>
             <option value="en">English</option>
             <option value="pt">Português</option>
           </select>
         </label>
 
+        <label>
+          Dictado nativo
+          <input
+            type="checkbox"
+            checked={nativeTyping}
+            onChange={(e) => setNativeTyping(e.target.checked)}
+          />
+        </label>
+
         <div className="buttons">
-          <button onClick={startSession} disabled={status === "Escuchando..." || isPaused}>
+          <button onClick={startSession} disabled={status === "Escuchando..." || status === "Procesando transcripción..." || !!wsRef.current}>
             Iniciar
           </button>
-          {wsRef.current && !isPaused && (
-            <button onClick={pauseSession}>Pausar</button>
-          )}
-          {isPaused && (
-            <button onClick={processAndResume}>Procesar</button>
-          )}
+          
           <button onClick={stopSession} disabled={!wsRef.current}>
             Detener
           </button>
+
+          <button onClick={finishAndTranscribe} disabled={!wsRef.current || status === "Procesando transcripción..."}>
+            Procesar
+          </button>
+          
           <button onClick={exportTranscript} disabled={!mergedTranscript}>
             Exportar texto
           </button>
