@@ -1,12 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 const TARGET_SAMPLE_RATE = 16000;
-const CHUNK_SAMPLES = 320; // 20ms @ 16kHz
-const MAX_RECONNECT_ATTEMPTS = 3;
-const RECONNECT_BASE_DELAY_MS = 1000;
-const NATIVE_FLUSH_INTERVAL_MS = 120;
-const SILENCE_THRESHOLD = 0.008;
-const AUTO_SILENCE_MS = 4000;
+const CHUNK_SAMPLES = 2560; // 160ms @ 16kHz
+const NATIVE_FLUSH_INTERVAL_MS = 16;
 const MAX_PENDING_SAMPLES = Math.floor(TARGET_SAMPLE_RATE * 0.5);
 const WAVE_BARS = Array.from({ length: 13 }, (_, i) => i);
 
@@ -68,7 +64,7 @@ function appendOnlyDelta(current: string, desired: string) {
 }
 
 export default function App() {
-  const [status, setStatus] = useState("Idle");
+  const [status, setStatus] = useState("Inactivo");
   const [language, setLanguage] = useState("es");
   const [partials, setPartials] = useState("");
   const [finals, setFinals] = useState<string[]>([]);
@@ -81,7 +77,11 @@ export default function App() {
   const workletNodeRef = useRef<AudioWorkletNode | null>(null);
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const pendingSamplesRef = useRef<number[]>([]);
-  const nativeTypingRef = useRef(false);
+  
+  const connectedRef = useRef(false);
+
+  // Native typing state
+  const nativeTypingRef = useRef(nativeTyping);
   const nativeDesiredRef = useRef("");
   const nativeSessionTextRef = useRef("");
   const nativeInFlightRef = useRef(false);
@@ -89,12 +89,6 @@ export default function App() {
   const nativeAfterCommitRef = useRef<string | null>(null);
   const nativeStopPendingRef = useRef(false);
   const nativeFlushTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const reconnectAttemptsRef = useRef(0);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const canSendAudioRef = useRef(true);
-  const autoCommitInFlightRef = useRef(false);
-  const lastVoiceAtRef = useRef(Date.now());
-  const restartInFlightRef = useRef(false);
 
   const mergedTranscript = useMemo(() => finals.join(" "), [finals]);
   const showWave = recording && status !== "Error" && !status.includes("Procesando");
@@ -110,12 +104,7 @@ export default function App() {
       const res = await fetch("/api/native/type", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text,
-          backspaces,
-          appendSpace,
-          delayMs
-        })
+        body: JSON.stringify({ text, backspaces, appendSpace, delayMs })
       });
       if (!res.ok) {
         const data = await res.json().catch(() => null);
@@ -128,7 +117,6 @@ export default function App() {
       return false;
     }
   }, []);
-
 
   const resetNativeBuffer = useCallback(() => {
     nativeDesiredRef.current = "";
@@ -177,6 +165,8 @@ export default function App() {
             scheduleNativeFlush();
           }
         }
+      } else {
+        scheduleNativeFlush();
       }
     } finally {
       nativeInFlightRef.current = false;
@@ -227,19 +217,115 @@ export default function App() {
     scheduleNativeFlush();
   };
 
-  const stopSession = useCallback(() => {
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = null;
-    }
-    reconnectAttemptsRef.current = 0;
+  const connectAndStart = async () => {
+    setError(null);
+    setStatus("Creando sesión...");
+    
+    try {
+      const res = await fetch("/api/realtime/session", { method: "POST" });
+      if (!res.ok) throw new Error("No se pudo crear la sesión");
+      
+      const { wsUrl } = await res.json();
+      setStatus("Conectando...");
+      
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
 
+      ws.onopen = async () => {
+        connectedRef.current = true;
+        try {
+          await startAudio();
+          ws.send(JSON.stringify({ type: "start_recording" }));
+          setStatus("Grabando...");
+          setRecording(true);
+        } catch (err) {
+          setError("Microphone permission denied");
+          setStatus("Error");
+        }
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          
+          if (msg.type === "final_transcript") {
+            if (msg.text) {
+              setFinals((prev) => [...prev, msg.text as string]);
+              queueNativeText(msg.text as string, true);
+            }
+            setStatus("Conectado");
+          } else if (msg.type === "status") {
+             if (msg.state === "recording") {
+                 setRecording(true);
+                 setStatus("Grabando...");
+             } else if (msg.state === "processing") {
+                 setStatus("Procesando transcripción...");
+                 setRecording(false);
+             } else {
+                 setStatus("Conectado");
+             }
+          } else if (msg.type === "global_hotkey") {
+             if (!nativeTypingRef.current) return; // Ignorar atajos globales si el dictado nativo está desactivado
+             if (msg.action === "start") {
+                 setFinals([]); // Limpiar al iniciar
+                 startRecording();
+             } else if (msg.action === "stop") {
+                 stopAndTranscribe();
+             }
+          } else if (msg.type === "error") {
+             setError(msg.message || "Error");
+             setStatus("Error");
+          }
+        } catch (e) {}
+      };
+
+      ws.onclose = () => {
+        connectedRef.current = false;
+        wsRef.current = null;
+        setStatus("Desconectado");
+        setRecording(false);
+      };
+
+      ws.onerror = () => {
+        setError("Error de conexión");
+      };
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Error al conectar");
+      setStatus("Error");
+    }
+  };
+
+  const startRecording = () => {
+    if (!connectedRef.current) {
+        connectAndStart();
+    } else if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "start_recording" }));
+    }
+  };
+
+  const stopAndTranscribe = () => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      // Flush any remaining audio
+      const pending = pendingSamplesRef.current;
+      if (pending.length > 0) {
+        const chunk = new Int16Array(pending.length);
+        for (let i = 0; i < pending.length; i += 1) {
+          chunk[i] = pending[i] as number;
+        }
+        pending.length = 0;
+        wsRef.current.send(JSON.stringify({ type: "audio_chunk", audio: pcm16ToBase64(chunk) }));
+      }
+      wsRef.current.send(JSON.stringify({ type: "stop_and_transcribe" }));
+    }
+  };
+
+  const stopSession = useCallback(() => {
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: "stop" }));
       ws.close();
     }
     wsRef.current = null;
+    connectedRef.current = false;
 
     workletNodeRef.current?.disconnect();
     workletNodeRef.current = null;
@@ -251,193 +337,48 @@ export default function App() {
     audioContextRef.current = null;
 
     pendingSamplesRef.current = [];
-    canSendAudioRef.current = true;
-    autoCommitInFlightRef.current = false;
-    restartInFlightRef.current = false;
-    if (nativeTypingRef.current && (nativeInFlightRef.current || nativeCommitPendingRef.current)) {
-      nativeStopPendingRef.current = true;
-    } else {
-      resetNativeBuffer();
-    }
+    resetNativeBuffer();
     setStatus("Detenido");
     setRecording(false);
   }, [resetNativeBuffer]);
 
-  const finishAndTranscribe = useCallback(() => {
-    // Apagar micrófono visualmente
-    workletNodeRef.current?.disconnect();
-    workletNodeRef.current = null;
-    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
-    mediaStreamRef.current = null;
-    audioContextRef.current?.close();
-    audioContextRef.current = null;
-    setRecording(false);
-
-    // Enviar pendientes y comando commit al backend
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      const pending = pendingSamplesRef.current;
-      if (pending.length > 0) {
-        const chunk = new Int16Array(pending.length);
-        for (let i = 0; i < pending.length; i += 1) {
-          chunk[i] = pending[i] as number;
-        }
-        pending.length = 0;
-        ws.send(JSON.stringify({ type: "audio_chunk", audio: pcm16ToBase64(chunk) }));
-      }
-      ws.send(JSON.stringify({ type: "commit" }));
-      setStatus("Procesando transcripción...");
-    } else {
-      stopSession();
-    }
+  useEffect(() => {
+    return () => stopSession();
   }, [stopSession]);
 
   useEffect(() => {
-    return () => {
-      stopSession();
+    let isKeyDown = false;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.altKey && e.key.toLowerCase() === "i" && !e.repeat) {
+        e.preventDefault();
+        isKeyDown = true;
+        setFinals([]); // Clear the transcript text box
+        startRecording();
+      }
     };
-  }, [stopSession]);
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (isKeyDown && (e.key.toLowerCase() === "i" || e.key === "Alt" || e.key === "AltGraph")) {
+        e.preventDefault();
+        isKeyDown = false;
+        stopAndTranscribe();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("keyup", handleKeyUp);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, []);
 
   useEffect(() => {
     nativeTypingRef.current = nativeTyping;
-    if (!nativeTyping) {
-      resetNativeBuffer();
-    }
+    if (!nativeTyping) resetNativeBuffer();
   }, [nativeTyping, resetNativeBuffer]);
 
-  const sendStartMessage = useCallback(() => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(
-      JSON.stringify({
-        type: "start",
-        config: { language, vad: "none" }
-      })
-    );
-  }, [language]);
-
-  const startSession = async () => {
-    if (wsRef.current) return;
-    setError(null);
-    setStatus("Creando sesión...");
-    setPartials("");
-    setFinals([]);
-    canSendAudioRef.current = true;
-    autoCommitInFlightRef.current = false;
-    restartInFlightRef.current = false;
-    lastVoiceAtRef.current = Date.now();
-
-    const res = await fetch("/api/realtime/session", { method: "POST" });
-    if (!res.ok) {
-      setError("No se pudo crear la sesión");
-      setStatus("Error");
-      return;
-    }
-    const { wsUrl } = await res.json();
-    setStatus("Conectando al servidor...");
-
-    const connectWebSocket = (attempt = 0) => {
-      const ws = new WebSocket(wsUrl);
-      wsRef.current = ws;
-
-      ws.onopen = async () => {
-        reconnectAttemptsRef.current = 0;
-        setStatus("Conectado, iniciando audio...");
-        sendStartMessage();
-        try {
-          setStatus("Solicitando permiso de micrófono...");
-          await startAudio();
-          setStatus("Escuchando...");
-          setRecording(true);
-        } catch (err) {
-          setError("Permiso de micrófono denegado o no disponible");
-          setStatus("Error");
-          setRecording(false);
-        }
-      };
-
-      ws.onmessage = (event) => {
-        const msg = JSON.parse(event.data);
-        console.log("WebSocket event:", msg);
-
-        if (msg.type === "status") {
-          if (msg.state === "listening" || msg.state === "connected") {
-            setStatus("Escuchando...");
-            setRecording(true);
-            canSendAudioRef.current = true;
-            autoCommitInFlightRef.current = false;
-            restartInFlightRef.current = false;
-          }
-          if (msg.state === "processing") setStatus("Procesando transcripción...");
-          if (msg.state === "openai_closed" || msg.state === "gemini_closed") {
-            setStatus("Sesión cerrada");
-            setRecording(false);
-          }
-        }
-
-        if (msg.type === "speech_started") {
-          setStatus("Hablando...");
-        }
-
-        if (msg.type === "partial_transcript") {
-          const text = typeof msg.text === "string" ? msg.text : "";
-          setPartials(text);
-          setStatus("Transcribiendo...");
-        }
-
-        if (msg.type === "final_transcript") {
-          if (msg.text) {
-            setFinals((prev) => [...prev, msg.text as string]);
-            queueNativeText(msg.text as string, true);
-          }
-          setPartials("");
-          if (!workletNodeRef.current) {
-            stopSession();
-          } else if (autoCommitInFlightRef.current) {
-            setStatus("En pausa por silencio...");
-            canSendAudioRef.current = false;
-          } else {
-            setStatus("Escuchando...");
-          }
-        }
-
-        if (msg.type === "error") {
-          if (msg.message && msg.message.includes("buffer too small")) {
-            if (!workletNodeRef.current) {
-              stopSession();
-            }
-            return;
-          }
-          setError(msg.message || "Error");
-          setStatus("Error");
-        }
-      };
-
-      ws.onerror = () => {
-        setError("Error de conexión");
-        setStatus("Error");
-      };
-
-      ws.onclose = (event) => {
-        wsRef.current = null;
-
-        if (event.code !== 1000 && attempt < MAX_RECONNECT_ATTEMPTS) {
-          const delay = RECONNECT_BASE_DELAY_MS * Math.pow(2, attempt);
-          setStatus(`Reconectando en ${delay / 1000}s...`);
-          reconnectTimeoutRef.current = setTimeout(() => {
-            connectWebSocket(attempt + 1);
-          }, delay);
-        } else {
-          // If already in 'Procesando...', we let it finish or error, otherwise:
-          setStatus("Detenido");
-        }
-      };
-    };
-
-    connectWebSocket();
-  };
-
   const startAudio = async () => {
+    if (mediaStreamRef.current) return;
+    
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     mediaStreamRef.current = stream;
 
@@ -453,38 +394,13 @@ export default function App() {
     workletNodeRef.current = workletNode;
 
     workletNode.port.onmessage = (event) => {
+      // Don't send audio unless recording state is true
+      if (!recording && connectedRef.current === false) return; // connectedRef implies we are setting up, but the server expects audio
+      
       const input = event.data as Float32Array;
       const resampled = resampleFloat32(input, audioContext.sampleRate, TARGET_SAMPLE_RATE);
       const pcm16 = floatToPCM16(resampled);
-      let rms = 0;
-      for (let i = 0; i < resampled.length; i += 1) {
-        const v = resampled[i];
-        rms += v * v;
-      }
-      rms = Math.sqrt(rms / Math.max(1, resampled.length));
-      const now = Date.now();
-      if (rms >= SILENCE_THRESHOLD) {
-        lastVoiceAtRef.current = now;
-        if (!canSendAudioRef.current && !restartInFlightRef.current) {
-          restartInFlightRef.current = true;
-          autoCommitInFlightRef.current = false;
-          setStatus("Reanudando...");
-          sendStartMessage();
-        }
-      } else if (
-        canSendAudioRef.current &&
-        !autoCommitInFlightRef.current &&
-        now - lastVoiceAtRef.current > AUTO_SILENCE_MS
-      ) {
-        autoCommitInFlightRef.current = true;
-        canSendAudioRef.current = false;
-        const ws = wsRef.current;
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: "commit" }));
-          setStatus("Procesando transcripción...");
-        }
-      }
-
+      
       const pending = pendingSamplesRef.current;
       for (let i = 0; i < pcm16.length; i += 1) {
         pending.push(pcm16[i]);
@@ -493,12 +409,17 @@ export default function App() {
         pending.splice(0, pending.length - MAX_PENDING_SAMPLES);
       }
 
-      while (pending.length >= CHUNK_SAMPLES && canSendAudioRef.current) {
+      while (pending.length >= CHUNK_SAMPLES) {
         const chunk = new Int16Array(CHUNK_SAMPLES);
         for (let i = 0; i < CHUNK_SAMPLES; i += 1) {
           chunk[i] = pending.shift() as number;
         }
-        sendAudioChunk(chunk);
+        if (connectedRef.current && wsRef.current?.readyState === WebSocket.OPEN) {
+           wsRef.current.send(JSON.stringify({
+             type: "audio_chunk",
+             audio: pcm16ToBase64(chunk)
+           }));
+        }
       }
     };
 
@@ -508,19 +429,8 @@ export default function App() {
     workletNode.connect(mute).connect(audioContext.destination);
   };
 
-  const sendAudioChunk = (chunk: Int16Array) => {
-    const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(
-      JSON.stringify({
-        type: "audio_chunk",
-        audio: pcm16ToBase64(chunk)
-      })
-    );
-  };
-
   const statusClass = status === "Error" ? "status-error"
-    : status.includes("Escuchando") || status.includes("Hablando") || status.includes("Transcribiendo") || status.includes("Procesando")
+    : status.includes("Escuchando") || status.includes("Grabando") || status.includes("Procesando")
       ? "status-listening"
       : "";
 
@@ -538,8 +448,8 @@ export default function App() {
     <div className="app">
       <header className="header">
         <div>
-          <h1>Voz a Texto</h1>
-          <p>Transcripción en tiempo real con Gemini Multimodal Live</p>
+          <h1>Voz a Texto Local</h1>
+          <p>Transcripción privada con ParaKeet V3 Push-to-Talk</p>
         </div>
         <div className="status-stack">
           <div className={`status ${statusClass}`}>
@@ -576,18 +486,14 @@ export default function App() {
         </label>
 
         <div className="buttons">
-          <button onClick={startSession} disabled={status === "Escuchando..." || status === "Procesando transcripción..." || !!wsRef.current}>
-            Iniciar
-          </button>
-          
-          <button onClick={stopSession} disabled={!wsRef.current}>
-            Detener
+          <button onMouseDown={startRecording} onMouseUp={stopAndTranscribe} onMouseLeave={stopAndTranscribe}>
+            Mantener presionado para Iniciar <span className="shortcut">Alt+I</span>
           </button>
 
-          <button onClick={finishAndTranscribe} disabled={!wsRef.current || status === "Procesando transcripción..."}>
-            Procesar
+          <button onClick={stopSession} disabled={!wsRef.current}>
+            Detener Sesión
           </button>
-          
+
           <button onClick={exportTranscript} disabled={!mergedTranscript}>
             Exportar texto
           </button>

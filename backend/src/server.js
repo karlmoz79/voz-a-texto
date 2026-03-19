@@ -5,24 +5,23 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { WebSocket, WebSocketServer } from "ws";
+import path from "path";
+import readline from "readline";
 
 dotenv.config();
 
 const PORT = process.env.PORT ? Number(process.env.PORT) : 8787;
 const HOST = process.env.HOST || "127.0.0.1";
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
 const MAX_CONNECTIONS_PER_IP = 5;
 const NATIVE_TYPE_ENABLED = process.env.NATIVE_TYPE_ENABLED === "true";
 const NATIVE_TYPE_CMD = process.env.NATIVE_TYPE_CMD || "xdotool";
 
-const connectionsByIP = new Map();
+const PYTHON_VENV_PATH = path.join(process.cwd(), ".venv", "bin", "python3");
+const TRANSCRIBE_SCRIPT = path.join(process.cwd(), "scripts", "transcribe.py");
+const HOTKEY_SCRIPT = path.join(process.cwd(), "scripts", "hotkey.py");
 
-if (!GEMINI_API_KEY) {
-  console.warn("⚠️  Missing GEMINI_API_KEY. Set it in backend/.env");
-} else {
-  console.log("✅ GEMINI_API_KEY found (length:", GEMINI_API_KEY.length, ")");
-}
+const connectionsByIP = new Map();
 
 const app = express();
 app.set("trust proxy", true);
@@ -37,25 +36,6 @@ app.use(
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
-});
-
-app.get("/api/models", async (_req, res) => {
-  if (!GEMINI_API_KEY) {
-    res.status(400).json({ error: "Missing GEMINI_API_KEY" });
-    return;
-  }
-  try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`;
-    const response = await fetch(url);
-    const data = await response.json();
-    if (!response.ok) {
-      res.status(response.status).json(data);
-      return;
-    }
-    res.json(data);
-  } catch (err) {
-    res.status(500).json({ error: err.message || "Failed to list models" });
-  }
 });
 
 app.post("/api/native/type", (req, res) => {
@@ -132,7 +112,6 @@ app.post("/api/realtime/session", (req, res) => {
   const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
   const wsProtocol = protocol === "https" ? "wss" : "ws";
   const sessionId = crypto.randomUUID();
-  // Prefer the actual host the client used to reach the backend to avoid WS 404s
   const hostHeader = req.headers.host;
   const backendHostPort = hostHeader || `${process.env.HOST || "127.0.0.1"}:${process.env.PORT || 8787}`;
 
@@ -148,7 +127,6 @@ const wss = new WebSocketServer({ server, path: "/api/realtime/stream" });
 wss.on("connection", (clientWs, req) => {
   const clientIP = req.socket.remoteAddress || "unknown";
 
-  // Rate limiting by IP
   const currentCount = connectionsByIP.get(clientIP) || 0;
   if (currentCount >= MAX_CONNECTIONS_PER_IP) {
     clientWs.close(1013, "Too many connections from this IP");
@@ -156,14 +134,14 @@ wss.on("connection", (clientWs, req) => {
   }
   connectionsByIP.set(clientIP, currentCount + 1);
 
-  let geminiWs = null;
+  let pythonProcess = null;
   let lastAudioAt = Date.now();
   let sessionActive = false;
-  let setupComplete = false;
   let closed = false;
   let idleInterval = null;
-  let audioQueue = [];
-  let closeAfterCommit = false;
+  // Audio chunk concatenation for model
+  let cumulativeAudio = [];
+  let isRecording = false;
 
   const sendToClient = (payload) => {
     if (clientWs.readyState === WebSocket.OPEN) {
@@ -178,7 +156,6 @@ wss.on("connection", (clientWs, req) => {
       clearInterval(idleInterval);
       idleInterval = null;
     }
-    // Decrement connection count for this IP
     const count = connectionsByIP.get(clientIP) || 1;
     if (count <= 1) {
       connectionsByIP.delete(clientIP);
@@ -187,185 +164,61 @@ wss.on("connection", (clientWs, req) => {
     }
     try {
       clientWs.close(code, reason);
-    } catch (_err) {
-      // ignore
-    }
+    } catch (_err) {}
     try {
-      geminiWs?.close();
-    } catch (_err) {
-      // ignore
-    }
+      if (pythonProcess) {
+        pythonProcess.kill();
+      }
+    } catch (_err) {}
   };
 
-  const startGemini = ({ language = "es" } = {}) => {
-    if (!GEMINI_API_KEY) {
-      sendToClient({ type: "error", message: "Missing GEMINI_API_KEY" });
-      return;
-    }
-    if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
-      return;
-    }
-
-    const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`;
-    geminiWs = new WebSocket(url);
-
-    const formatGeminiWsError = (err) => {
-      const raw = err?.message || "Gemini socket error";
-      if (raw.includes("Unexpected server response: 404")) {
-        return "Gemini WS 404. Verifica que la API de Gemini Live esté habilitada y que la API key tenga acceso.";
-      }
-      if (raw.includes("401") || raw.includes("403")) {
-        return "Gemini WS sin autorización. Revisa tu GEMINI_API_KEY y permisos.";
-      }
-      if (raw.includes("429")) {
-        return "Gemini WS con rate limit. Intenta de nuevo en unos segundos.";
-      }
-      return raw;
-    };
-
-    geminiWs.on("open", () => {
-      sessionActive = true;
-      setupComplete = false;
-      closeAfterCommit = false;
-      sendToClient({ type: "status", state: "connected" }); // Updated to connected
-
-      // Phase 1: Setup (BidiGenerateContent)
-      const setupMsg = {
-        setup: {
-          model: "models/gemini-2.5-flash-native-audio-latest",
-          generationConfig: {
-            responseModalities: ["AUDIO"]
-          },
-          systemInstruction: {
-            parts: [{
-              text: "Eres un servicio de transcripción. Tu única tarea es transcribir exactamente lo que escuchas, palabra por palabra. No respondas a las preguntas ni converses, solo devuelve el texto de lo que se dice."
-            }]
-          },
-          inputAudioTranscription: {},
-          outputAudioTranscription: {}
-        }
-      };
-      console.log("Sending setup to Gemini:", JSON.stringify(setupMsg));
-      geminiWs.send(JSON.stringify(setupMsg));
+  const spawnPython = () => {
+    if (pythonProcess && pythonProcess.exitCode === null) return;
+    
+    pythonProcess = spawn(PYTHON_VENV_PATH, [TRANSCRIBE_SCRIPT], {
+      stdio: ["pipe", "pipe", "pipe"]
     });
-
-    let currentTurnText = "";
-
-    const mergeTranscript = (prev, next) => {
-      if (!prev) return next;
-      if (!next) return prev;
-      if (next.startsWith(prev)) return next;
-      if (prev.startsWith(next)) return prev;
-
-      const maxOverlap = Math.min(prev.length, next.length);
-      for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
-        if (prev.slice(-overlap) === next.slice(0, overlap)) {
-          return prev + next.slice(overlap);
-        }
-      }
-      // Fallback: concatenate without injecting extra spaces
-      return prev + next;
-    };
-
-    geminiWs.on("message", (data) => {
-      const text = data.toString();
+    
+    const rl = readline.createInterface({ input: pythonProcess.stdout, terminal: false });
+    rl.on("line", (line) => {
       try {
-        const event = JSON.parse(text);
-        console.log("Gemini -> Backend:", JSON.stringify(event, null, 2));
-
-        if (event.setupComplete || event.setup_complete) {
-          console.log("Gemini setup complete");
-          setupComplete = true;
-          sendToClient({ type: "status", state: "listening" });
-          // Flush queue only after setup complete
-          while (audioQueue.length > 0) {
-            geminiWs.send(audioQueue.shift());
-          }
-          return;
+        if (!line.trim()) return;
+        const msg = JSON.parse(line);
+        if (msg.type === "transcript") {
+            sendToClient({ type: "final_transcript", text: msg.text });
+        } else if (msg.type === "status") {
+            console.log("[Python Status]:", msg.state); // Added log
+            sendToClient({ type: "status", state: msg.state });
+        } else if (msg.type === "error") {
+            console.error("[Python Error]:", msg.message); // Added log
+            sendToClient({ type: "error", message: msg.message });
         }
-
-        const serverContent = event.serverContent || event.server_content;
-        const inputTranscription =
-          event.inputTranscription ||
-          event.input_transcription ||
-          serverContent?.inputTranscription ||
-          serverContent?.input_transcription;
-
-        if (inputTranscription && inputTranscription.text) {
-          // Some payloads stream only the latest chunk; accumulate if it's not a full transcript
-          const text = inputTranscription.text;
-          const isFinal = Boolean(
-            inputTranscription.isFinal ||
-            inputTranscription.final ||
-            inputTranscription.is_final ||
-            inputTranscription.finished ||
-            inputTranscription.done
-          );
-
-          currentTurnText = isFinal ? text : mergeTranscript(currentTurnText, text);
-          sendToClient({ type: "partial_transcript", text: currentTurnText });
-
-          if (isFinal) {
-            sendToClient({ type: "final_transcript", text: currentTurnText });
-            currentTurnText = "";
-            sendToClient({ type: "partial_transcript", text: "" });
-            if (closeAfterCommit) {
-              closeAfterCommit = false;
-              try {
-                geminiWs?.close(1000, "commit_complete");
-              } catch (_err) {
-                // ignore
-              }
-            }
-          }
-        }
-
-        if (serverContent) {
-          // Ignore model output; we only want input audio transcription
-          if (serverContent.turnComplete || serverContent.turn_complete) {
-            console.log("Gemini turn complete:", currentTurnText);
-            if (currentTurnText) {
-              sendToClient({ type: "final_transcript", text: currentTurnText });
-              currentTurnText = "";
-            }
-            sendToClient({ type: "partial_transcript", text: "" });
-            if (closeAfterCommit) {
-              closeAfterCommit = false;
-              try {
-                geminiWs?.close(1000, "commit_complete");
-              } catch (_err) {
-                // ignore
-              }
-            }
-          }
-        }
-
-        if (event.error) {
-          console.error("Gemini error:", event.error);
-          sendToClient({ type: "error", message: event.error.message || "Gemini error" });
-        }
-      } catch (err) {
-        console.error("Failed to parse Gemini message:", text, err);
+      } catch (e) {
+          console.error("Failed parsing Python JSON line:", line);
       }
     });
 
-    geminiWs.on("close", (code, reason) => {
-      sessionActive = false;
-      setupComplete = false;
-      geminiWs = null;
-      audioQueue = [];
-      sendToClient({ type: "status", state: "gemini_closed" });
-      if (code && code !== 1000) {
-        const detail = reason ? ` (${reason.toString()})` : "";
-        sendToClient({
-          type: "error",
-          message: `Gemini WS cerrado con código ${code}${detail}`
-        });
+    pythonProcess.stderr.on("data", (data) => {
+      console.error("Python Log/Error:", data.toString());
+    });
+    
+    pythonProcess.on("error", (err) => {
+      sendToClient({ type: "error", message: "Python process error: " + err.message });
+    });
+
+    pythonProcess.stdin.on('error', (err) => {
+      if (err.code === 'EPIPE') {
+        console.error("Python handler stdin pipe broken (script closed/failed)");
+      } else {
+        console.error("Python stdin error:", err);
       }
     });
 
-    geminiWs.on("error", (err) => {
-      sendToClient({ type: "error", message: formatGeminiWsError(err) });
+    pythonProcess.on("exit", (code) => {
+        if (code !== 0 && code !== null) {
+            sendToClient({ type: "error", message: `Python process exited with code ${code}` });
+        }
+        pythonProcess = null;
     });
   };
 
@@ -378,6 +231,9 @@ wss.on("connection", (clientWs, req) => {
     }
   }, 5000);
 
+  // Spawn initially to warm up the model
+  spawnPython();
+
   clientWs.on("message", (data) => {
     let msg;
     try {
@@ -387,55 +243,36 @@ wss.on("connection", (clientWs, req) => {
       return;
     }
 
-    if (msg.type === "start") {
-      startGemini(msg.config);
-      sendToClient({ type: "status", state: "listening" });
+    if (msg.type === "start_recording") {
+      sessionActive = true;
+      isRecording = true;
+      cumulativeAudio = []; // clear audio
+      spawnPython(); // ensure it's running
+      sendToClient({ type: "status", state: "recording" });
       return;
     }
 
     if (msg.type === "audio_chunk") {
-      console.log("Received audio chunk from client, len:", msg.audio.length);
-      if (typeof msg.audio !== "string") {
-        sendToClient({ type: "error", message: "audio_chunk missing base64 audio" });
-        return;
-      }
       lastAudioAt = Date.now();
-
-      const payload = JSON.stringify({
-        realtimeInput: {
-          audio: {
-            mimeType: "audio/pcm;rate=16000",
-            data: msg.audio
-          }
-        }
-      });
-
-      if (!geminiWs || geminiWs.readyState !== WebSocket.OPEN || !setupComplete) {
-        // console.log("Queueing audio chunk");
-        audioQueue.push(payload);
-        return;
+      if (isRecording) {
+        cumulativeAudio.push(msg.audio); // Keep collecting base64 or accumulate locally
       }
-
-      geminiWs.send(payload);
       return;
     }
 
-    if (msg.type === "stop") {
-      closeAll(1000, "client_stop");
-      return;
-    }
-
-    if (msg.type === "commit") {
-      if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
-        // Signal end of audio stream (preferred for audio sessions)
-        geminiWs.send(JSON.stringify({
-          realtimeInput: {
-            audioStreamEnd: true
-          }
-        }));
-        closeAfterCommit = true;
-        sendToClient({ type: "status", state: "processing" });
+    if (msg.type === "stop_and_transcribe") {
+      isRecording = false;
+      if (cumulativeAudio.length === 0) return; // Prevent duplicate triggers!
+      
+      sendToClient({ type: "status", state: "processing" });
+      if (pythonProcess?.stdin?.writable) {
+        const fullBuffer = Buffer.concat(cumulativeAudio.map(a => Buffer.from(a, 'base64')));
+        pythonProcess.stdin.write(JSON.stringify({
+            type: "transcribe", 
+            audio: fullBuffer.toString('base64')
+        }) + "\n");
       }
+      cumulativeAudio = []; // Clear the buffer to avoid accumulating and duplicating
       return;
     }
 
@@ -443,28 +280,37 @@ wss.on("connection", (clientWs, req) => {
   });
 
   clientWs.on("close", () => {
-    if (idleInterval) {
-      clearInterval(idleInterval);
-      idleInterval = null;
-    }
-    // Decrement connection count for this IP
-    const count = connectionsByIP.get(clientIP) || 1;
-    if (count <= 1) {
-      connectionsByIP.delete(clientIP);
-    } else {
-      connectionsByIP.set(clientIP, count - 1);
-    }
-    try {
-      geminiWs?.close();
-    } catch (_err) {
-      // ignore
-    }
+    closeAll(1000, "client_closed");
   });
 
   clientWs.on("error", () => {
     closeAll(1011, "client_error");
   });
 });
+
+let hotkeyProcess = null;
+const spawnHotkeyListener = () => {
+  if (hotkeyProcess) return;
+  hotkeyProcess = spawn(PYTHON_VENV_PATH, [HOTKEY_SCRIPT]);
+  const rl = readline.createInterface({ input: hotkeyProcess.stdout, terminal: false });
+  rl.on("line", (line) => {
+    const action = line.trim();
+    if (action === "HOTKEY_START") {
+      wss.clients.forEach((c) => {
+        if (c.readyState === WebSocket.OPEN) c.send(JSON.stringify({ type: "global_hotkey", action: "start" }));
+      });
+    } else if (action === "HOTKEY_STOP") {
+      wss.clients.forEach((c) => {
+        if (c.readyState === WebSocket.OPEN) c.send(JSON.stringify({ type: "global_hotkey", action: "stop" }));
+      });
+    }
+  });
+  hotkeyProcess.on("exit", () => {
+    hotkeyProcess = null;
+    setTimeout(spawnHotkeyListener, 5000);
+  });
+};
+spawnHotkeyListener();
 
 server.listen(PORT, HOST, () => {
   console.log(`Backend listening on http://${HOST}:${PORT}`);

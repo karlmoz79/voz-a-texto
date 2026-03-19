@@ -1,15 +1,16 @@
-# AGENTS.md - Voz a Texto en Tiempo Real
+# AGENTS.md - Voz a Texto en Tiempo Real Local
 
 ## Resumen del proyecto
-- Objetivo: App web que captura micrófono y transcribe en tiempo real usando Gemini Live (BidiGenerateContent).
-- Características Modulares: Transmisión en tiempo real al WebSocket, finalización de stream con "Procesar" (commit) y exportación local de archivos con transcripción (.txt). Dictado nativo opcional en Linux.
-- Stack: Backend Node.js (Express + ws) y Frontend React + Vite + TypeScript.
-- Versión mínima: Node.js 18+, npm 8+.
+- Objetivo: App web que captura micrófono y transcribe de manera completamente local y privada usando el modelo STT Fast Conformer Hybrid Large PC de NVIDIA (local).
+- Características Modulares: Captura de dictado con modo "Push-to-Talk" global vía escucha profunda del teclado (presionar Alt+I), transmisión y acumulación de buffers al WebSocket mientras el usuario dicta, modelo ASR ejecutado en subproceso en Python (Node -> Python child_process), transcripción offline del texto y exportación de archivos (.txt). Dictado nativo opcional simulando el teclado en Linux (`xdotool`).
+- Stack: Backend Node.js (Express + ws) corriendo en paralelo al código de Python 3 (NeMo acelerado con PyTorch). Frontend compuesto en React + Vite + TypeScript.
+- Versión mínima: Node.js 18+, Python 3.10+, npm 8+.
 
 ## Setup y desarrollo
-- Instalar dependencias: `npm install` (raíz). Se configuran espacios de trabajo (workspaces).
-- Iniciar entorno local: `npm run dev` (raíz - levanta backend y frontend mediante *concurrently*) o comandos separados en workspaces: `npm run dev --workspace backend` y `npm run dev --workspace frontend`.
-- Variables de entorno: `backend/.env` (ver `backend/.env.example`).
+- Instalar dependencias web JS: `npm install` (raíz). Se configuran espacios de trabajo (workspaces).
+- Entorno nativo local en Python (usando la herramienta estricta `uv` e instanciando con `pyproject.toml`): `cd backend && uv sync` (Esto creará automáticamente el entorno virtual y resolverá las dependencias).
+- Iniciar entorno local (servidor de UI y servidor Transcriptor): `npm run dev` (raíz - levanta backend y frontend mediante *concurrently*).
+- Variables de entorno locales: copiar `backend/.env.example` o editar en directo `backend/.env`.
 
 ## Calidad (obligatorio antes de finalizar)
 - Lint: `N/A`
@@ -18,32 +19,31 @@
 - Build local (si aplica): `npm run build --workspace frontend`
 
 ## Convenciones de codigo
-- Lenguaje/estilo: JS ESM en backend; TypeScript/React en frontend; mantener código simple y explícito, respetando arquitecturas funcionales y de hooks en React.
-- Arquitectura: puente WebSocket en backend controlando flujos de Gemini, ratelimits, cola de audio hasta `setupComplete`, y dictado nativo; Frontend con UI minimalista que captura audio PCM16 a 16kHz usando AudioContext + AudioWorklets, resampleo y chunks base64.
-- Evitar: incluir secretos, cambiar APIs sin actualizar la documentación pertinente como `README.md`/`AGENTS.md`.
+- Lenguaje/estilo: JS ESM en backend; TypeScript/React en frontend; Scripts de machine learning modulares e independientes en Python 3. Adherencia a una arquitectura limpia asincrónica y simplificada.
+- Mantener siempre la infraestructura Python controlada y empaquetada estrictamente gestionada bajo el ecosistema de resoluciones `uv`.
+- Arquitectura centralizada: frontend con UI de modo "Push-to-Talk" con control exclusivo a través de un websocket bidireccional, despachando chunks a la capa backend en Node.js, donde este levanta y controla su CLI de Python subyacente para inyectar flujos PCM decodificados en memoria (`stdin`) de manera paralela hasta que finaliza la petición con la transcripción devuelta (`stdout`).
+- Las dependencias deberán documentarse si son necesarias.
 
 ## Reglas de cambios
-- No modificar: `node_modules/`, archivos `.env` con secretos.
+- No modificar: `node_modules/`, `.venv/` o carpetas temporales para modelos, archivos `.env` (donde haya configuraciones en local absolutas).
+- Evitar: incluir rutas absolutas en repo o subir tokens accidentalmente y modificar el flujo principal del Python subprocess sin la debida consideración.
 - Migraciones: `N/A`
-- Dependencias nuevas: justificar necesidad y mantener mínimo.
 
 ## Seguridad y datos
-- Nunca commitear secretos (`.env`, llaves, tokens).
-- Mascaras de datos sensibles en logs.
-- Revisar permisos y validaciones de entrada/salida (especialmente controlando los bytes y chunks de audio con conversor a base64).
+- Nunca commitear archivos `.env` al menos que contengas variables inofensivas en un archivo `example`.
+- Máscaras de datos sensibles si aplican. Validaciones y sanitizaciones obligatorias cuando se pase la terminal hacia procesos crudos como `xdotool`.
 
 ## Flujo de trabajo
 - Commits: `feat/fix/chore` descriptivo.
-- PR: describir cambios y pasos de prueba.
-- Definicion de terminado: servidores levantan y flujo de transcripción funciona (incluyendo el envío al procesar de chunks guardados); cambios documentados.
+- Definicion de terminado: levantamiento sincrono del clúster vite + el motor de Node, subprocesos de Python emitiendo estados de JSON sin crasheos y dictado sobre inputs físicos en Linux garantizado usando keyups sin latencia desmedida. 
 
-## Monorepo (si aplica)
-- Package principal: root con workspaces `backend` y `frontend`. Soporta rutinas completas mediamente `concurrently`.
-- Comandos por paquete: utilizable `npm run <cmd> --workspace <nombre-proyecto>`
-- Regla de precedencia: AGENTS.md de la raíz.
+## Monorepo
+- Package principal: codebase principal con workspaces `backend` y `frontend` nativos de npm. 
+- Comandos ejecutables cruzados: `npm run <cmd> --workspace <nombre-proyecto>`
+- Prestigio de documento: Éste AGENTS.md dicta el rumbo.
 
 ## Referencias
 - README: `./README.md`
-- PLAN: `./PLAN.md` (Esquema originario del alcance)
-- Arquitectura Central: `backend/src/server.js`, `frontend/src/App.tsx`, `frontend/src/audio-worklet.ts`
+- PLAN: Documentos en `docs/superpowers/plans/`.
+- Arquitectura Central: `backend/src/server.js`, `frontend/src/App.tsx`, `backend/scripts/transcribe.py`.
 - CI/CD: `N/A`

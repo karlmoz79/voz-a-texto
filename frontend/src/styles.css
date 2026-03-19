@@ -164,6 +164,20 @@ button:disabled {
   cursor: not-allowed;
 }
 
+button:disabled .shortcut {
+  color: #b8c0c7;
+}
+
+.shortcut {
+  font-size: 0.7rem;
+  font-weight: 400;
+  opacity: 0.85;
+  margin-left: 8px;
+  padding: 2px 6px;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
+}
+
 .error {
   background: #ffe3e3;
   color: #9b1c1c;
