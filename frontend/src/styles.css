@@ -33,6 +33,12 @@ body {
   justify-items: end;
 }
 
+.stack-note {
+  font-size: 0.82rem;
+  color: #52606d;
+  text-align: right;
+}
+
 .header h1 {
   margin: 0 0 8px;
   font-size: 2.5rem;
@@ -135,6 +141,33 @@ body {
   color: #52606d;
 }
 
+.session-meta {
+  display: grid;
+  gap: 4px;
+  min-width: 220px;
+}
+
+.session-meta span,
+.session-meta small,
+.toggle span {
+  color: #52606d;
+}
+
+.session-meta strong {
+  font-size: 1.05rem;
+}
+
+.toggle {
+  display: grid;
+  gap: 8px;
+  min-width: 160px;
+}
+
+.toggle input {
+  width: 18px;
+  height: 18px;
+}
+
 select {
   padding: 8px 12px;
   border-radius: 10px;
@@ -202,12 +235,8 @@ button:disabled .shortcut {
 .final {
   font-size: 1.1rem;
   line-height: 1.6;
-  margin-bottom: 12px;
-}
-
-.partial {
-  color: #7b8794;
-  font-style: italic;
+  margin-bottom: 0;
+  white-space: pre-wrap;
 }
 
 @media (max-width: 720px) {

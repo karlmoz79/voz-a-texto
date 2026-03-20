@@ -5,7 +5,8 @@
   "private": true,
   "scripts": {
     "dev": "node --watch src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "test": "node --test src/hotkey-owner.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
