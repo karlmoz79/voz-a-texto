@@ -2,13 +2,12 @@
   "name": "voice-to-text-app",
   "private": true,
   "workspaces": [
-    "backend",
-    "frontend"
+    "backend"
   ],
   "scripts": {
-    "dev": "concurrently -n backend,frontend -c red,cyan \"npm:dev --workspace backend\" \"npm:dev --workspace frontend\""
-  },
-  "devDependencies": {
-    "concurrently": "^8.2.2"
+    "dev": "npm run desktop --workspace backend",
+    "desktop": "npm run desktop --workspace backend",
+    "desktop:install": "npm run desktop:install --workspace backend",
+    "desktop:uninstall": "npm run desktop:uninstall --workspace backend"
   }
 }

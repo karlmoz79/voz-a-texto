@@ -1,0 +1,485 @@
+import threading
+from dataclasses import replace
+from pathlib import Path
+
+from PySide6.QtCore import QObject, Signal, QTimer, QDir
+from PySide6.QtWidgets import QApplication, QFileDialog, QSystemTrayIcon
+from PySide6.QtNetwork import QLocalServer
+
+from ..app_config import load_app_config, resolve_runtime_config, save_app_config
+from ..asr import ModelManager
+from ..models import get_model_profile
+from .autostart import AutostartError, AutostartService
+from .audio_capture import AudioCaptureService
+from .hotkey_service import GlobalHotkeyService
+from .native_typing import NativeTypingError, NativeTypingService
+from .transcript_store import TranscriptStore
+from .settings_window import SettingsWindow
+from .state import (
+    STATUS_ERROR,
+    STATUS_LOADING,
+    STATUS_PROCESSING,
+    STATUS_READY,
+    STATUS_RECORDING,
+    create_shell_state,
+)
+from .tray import TrayController
+
+
+class TranscriptionSignals(QObject):
+    completed = Signal(str)
+    failed = Signal(str)
+
+
+class ModelLoadSignals(QObject):
+    completed = Signal(object)
+    failed = Signal(object)
+
+
+class DesktopShellController(QObject):
+    def __init__(self, app, config_path=None):
+        super().__init__()
+        self.app = app
+        self.config_path = config_path
+        self.app_config = load_app_config(config_path)
+        self.runtime_config = resolve_runtime_config(stored_config=self.app_config)
+        self.shell_state = create_shell_state(self.runtime_config)
+        self.model_manager = ModelManager(self.runtime_config)
+        self.audio_capture_service = AudioCaptureService()
+        self.hotkey_service = GlobalHotkeyService(self.runtime_config.hotkey)
+        self.autostart_service = AutostartService()
+        self.native_typing_service = NativeTypingService()
+        self.transcript_store = TranscriptStore()
+        self.transcription_signals = TranscriptionSignals()
+        self.model_load_signals = ModelLoadSignals()
+        self._model_load_in_progress = False
+        self._native_typing_support_checked = False
+
+        self.settings_window = SettingsWindow()
+        self.tray_controller = TrayController(parent=app)
+        self._wire_signals()
+        self._apply_state()
+
+    def start(self):
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray_controller.show()
+        else:
+            self.show_settings()
+        self._reconcile_launch_at_login()
+        self._preload_active_model()
+        self.hotkey_service.start()
+        
+        self.ipc_server = QLocalServer()
+        self.ipc_server.removeServer("voz_a_texto_ipc")
+        if self.ipc_server.listen("voz_a_texto_ipc"):
+            self.ipc_server.newConnection.connect(self._on_ipc_connection)
+
+    def _on_ipc_connection(self):
+        socket = self.ipc_server.nextPendingConnection()
+        socket.readyRead.connect(lambda: self._handle_ipc(socket))
+        
+    def _handle_ipc(self, socket):
+        msg = socket.readAll().data().decode("utf-8")
+        if msg == "show_ui":
+            self.show_settings()
+            self.settings_window.raise_()
+        socket.disconnectFromServer()
+
+    def shutdown(self):
+        self.hotkey_service.stop()
+        if self.audio_capture_service.is_recording:
+            self.audio_capture_service.stop_recording()
+
+    def show_settings(self):
+        self.settings_window.present()
+
+    def set_last_transcript(self, text):
+        self.transcript_store.append(text)
+        self._replace_state(last_transcript=self.transcript_store.full_text)
+
+    def set_error(self, message):
+        self._replace_state(status=STATUS_ERROR, error_message=message)
+
+    def clear_error(self):
+        status = STATUS_READY if self.shell_state.status == STATUS_ERROR else self.shell_state.status
+        self._replace_state(status=status, error_message=None)
+
+    def _wire_signals(self):
+        self.app.aboutToQuit.connect(self.shutdown)
+
+        self.tray_controller.show_settings_requested.connect(self.show_settings)
+        self.tray_controller.model_selected.connect(self._set_active_model)
+        self.tray_controller.native_typing_toggled.connect(self._set_native_typing_enabled)
+        self.tray_controller.autostart_toggled.connect(self._set_launch_at_login)
+        self.tray_controller.export_requested.connect(self._export_transcript)
+        self.tray_controller.quit_requested.connect(self.app.quit)
+
+        self.settings_window.model_selected.connect(self._set_active_model)
+        self.settings_window.native_typing_toggled.connect(self._set_native_typing_enabled)
+        self.settings_window.autostart_toggled.connect(self._set_launch_at_login)
+        self.settings_window.export_requested.connect(self._export_transcript)
+        self.settings_window.hotkey_changed.connect(self._set_hotkey)
+
+        self.hotkey_service.activated.connect(self._handle_hotkey_pressed)
+        self.hotkey_service.released.connect(self._handle_hotkey_released)
+        self.hotkey_service.error.connect(self.set_error)
+        self.transcription_signals.completed.connect(self._handle_transcription_completed)
+        self.transcription_signals.failed.connect(self._handle_transcription_failed)
+        self.model_load_signals.completed.connect(self._handle_model_load_completed)
+        self.model_load_signals.failed.connect(self._handle_model_load_failed)
+
+    def _set_active_model(self, model_key):
+        profile = get_model_profile(model_key)
+        if (
+            self.app_config.active_model == profile.key
+            and self.shell_state.active_model == profile.key
+            and self.model_manager.loaded_model_id == profile.model_id
+        ):
+            return
+
+        if self.shell_state.status in {STATUS_RECORDING, STATUS_PROCESSING}:
+            self.tray_controller.show_message(
+                "Voz a Texto",
+                "No se puede cambiar el modelo mientras hay un dictado en curso.",
+            )
+            return
+
+        if self._model_load_in_progress:
+            self.tray_controller.show_message(
+                "Voz a Texto",
+                "Ya hay una carga de modelo en progreso.",
+            )
+            return
+
+        self._begin_model_load(profile, persist_config=True, announce_success=True)
+
+    def _set_native_typing_enabled(self, is_enabled):
+        if self.app_config.native_typing_enabled == is_enabled:
+            return
+
+        if is_enabled:
+            environment_error = self.native_typing_service.get_environment_error()
+            if environment_error:
+                self._disable_native_typing(environment_error, persist_config=False)
+                return
+
+        self._sync_native_typing_enabled(is_enabled, persist_config=True)
+        self._replace_state(native_typing_enabled=is_enabled, error_message=None)
+
+    def _set_hotkey(self, new_hotkey):
+        if not new_hotkey or self.app_config.hotkey == new_hotkey:
+            return
+
+        try:
+            self.hotkey_service.update_hotkey(new_hotkey)
+        except ValueError as exc:
+            self.tray_controller.show_message("Voz a Texto", f"Atajo invalido: {exc}")
+            self.settings_window.apply_state(self.shell_state)
+            return
+        except Exception as exc:
+            self.tray_controller.show_message("Voz a Texto", f"Error al cambiar atajo: {exc}")
+            self.settings_window.apply_state(self.shell_state)
+            return
+
+        self.app_config = replace(self.app_config, hotkey=new_hotkey)
+        self.runtime_config = replace(self.runtime_config, hotkey=new_hotkey)
+        save_app_config(self.app_config, self.config_path)
+        self._replace_state(hotkey=new_hotkey)
+        self.tray_controller.show_message("Voz a Texto", f"Atajo actualizado: {new_hotkey}")
+
+    def _set_launch_at_login(self, is_enabled):
+        if self.app_config.launch_at_login == is_enabled:
+            return
+
+        try:
+            self.autostart_service.sync_enabled(is_enabled)
+        except AutostartError as exc:
+            self._replace_state(error_message=str(exc))
+            self.tray_controller.show_message("Voz a Texto", str(exc))
+            return
+
+        self._sync_launch_at_login(is_enabled, persist_config=True)
+        self._replace_state(launch_at_login=is_enabled)
+        self.tray_controller.show_message(
+            "Voz a Texto",
+            "Inicio automatico activado." if is_enabled else "Inicio automatico desactivado.",
+        )
+
+    def _handle_hotkey_pressed(self):
+        if self.shell_state.status == STATUS_LOADING or self._model_load_in_progress:
+            self.tray_controller.show_message(
+                "Voz a Texto",
+                "El modelo aun se esta cargando. Intenta de nuevo en unos segundos.",
+            )
+            return
+
+        if self.shell_state.status in {STATUS_RECORDING, STATUS_PROCESSING}:
+            return
+
+        if not self.model_manager.has_loaded_model():
+            message = self.shell_state.error_message or "Aun no hay ningun modelo listo para transcribir."
+            self.set_error(message)
+            self.tray_controller.show_message("Voz a Texto", message)
+            return
+
+        self.clear_error()
+        start_error = self.audio_capture_service.start_recording(self.runtime_config.max_audio_sec)
+        if start_error:
+            self.set_error(start_error)
+            self.tray_controller.show_message("Voz a Texto", start_error)
+            return
+
+        self._replace_state(status=STATUS_RECORDING)
+
+    def _handle_hotkey_released(self):
+        if self.shell_state.status != STATUS_RECORDING:
+            return
+
+        capture_result = self.audio_capture_service.stop_recording()
+        if capture_result.error_message:
+            self.set_error(capture_result.error_message)
+            self.tray_controller.show_message("Voz a Texto", capture_result.error_message)
+            return
+
+        if capture_result.too_long:
+            message = (
+                f"El audio supero el maximo de {self.runtime_config.max_audio_sec} segundos."
+            )
+            self.set_error(message)
+            self.tray_controller.show_message("Voz a Texto", message)
+            return
+
+        if not capture_result.audio_bytes:
+            self._replace_state(status=STATUS_READY)
+            return
+
+        model_id = self.runtime_config.model_id
+        self._replace_state(status=STATUS_PROCESSING)
+        worker = threading.Thread(
+            target=self._run_transcription,
+            args=(capture_result.audio_bytes, model_id),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_transcription(self, audio_bytes, model_id):
+        try:
+            text = self.model_manager.transcribe_bytes(audio_bytes, model_id=model_id).strip()
+        except Exception as exc:
+            self.transcription_signals.failed.emit(f"Error transcribiendo: {exc}")
+            return
+
+        self.transcription_signals.completed.emit(text)
+
+    def _handle_transcription_completed(self, text):
+        if text:
+            self.transcript_store.append(text)
+            next_transcript = self.transcript_store.full_text
+
+            if self.runtime_config.native_typing_enabled:
+                try:
+                    self.native_typing_service.type_text(text)
+                except NativeTypingError as exc:
+                    if exc.disable_feature:
+                        self._disable_native_typing(
+                            str(exc),
+                            persist_config=True,
+                            extra_state={
+                                "status": STATUS_READY,
+                                "last_transcript": next_transcript,
+                            },
+                        )
+                    else:
+                        self._replace_state(
+                            status=STATUS_READY,
+                            last_transcript=next_transcript,
+                            error_message=str(exc),
+                        )
+                        self.tray_controller.show_message("Voz a Texto", str(exc))
+                    return
+                except Exception as exc:
+                    message = f"No se pudo dictar el texto en la ventana activa: {exc}"
+                    self._replace_state(
+                        status=STATUS_READY,
+                        last_transcript=next_transcript,
+                        error_message=message,
+                    )
+                    self.tray_controller.show_message("Voz a Texto", message)
+                    return
+
+            self._replace_state(
+                status=STATUS_READY,
+                last_transcript=next_transcript,
+                error_message=None,
+            )
+            self.tray_controller.show_message("Voz a Texto", "Transcripcion completada.")
+            return
+
+        self._replace_state(status=STATUS_READY, error_message=None)
+
+    def _handle_transcription_failed(self, message):
+        self.set_error(message)
+        self.tray_controller.show_message("Voz a Texto", message)
+
+    def _preload_active_model(self):
+        if self._model_load_in_progress:
+            return
+
+        profile = get_model_profile(self.runtime_config.active_model)
+        self._begin_model_load(profile, persist_config=False, announce_success=False)
+
+    def _begin_model_load(self, profile, persist_config, announce_success):
+        if self._model_load_in_progress:
+            return False
+
+        self._model_load_in_progress = True
+        self._replace_state(status=STATUS_LOADING, error_message=None)
+        worker = threading.Thread(
+            target=self._run_model_load,
+            args=(
+                {
+                    "model_key": profile.key,
+                    "model_id": profile.model_id,
+                    "model_label": profile.label,
+                    "persist_config": persist_config,
+                    "announce_success": announce_success,
+                },
+            ),
+            daemon=True,
+        )
+        worker.start()
+        return True
+
+    def _run_model_load(self, context):
+        try:
+            self.model_manager.switch_active_model(context["model_id"])
+        except Exception as exc:
+            self.model_load_signals.failed.emit(
+                {
+                    **context,
+                    "message": f"No se pudo cargar {context['model_label']}: {exc}",
+                }
+            )
+            return
+
+        self.model_load_signals.completed.emit(context)
+
+    def _handle_model_load_completed(self, context):
+        self._model_load_in_progress = False
+        self.runtime_config = replace(
+            self.runtime_config,
+            active_model=context["model_key"],
+            model_id=context["model_id"],
+        )
+        self.model_manager.runtime_config = self.runtime_config
+
+        if context["persist_config"]:
+            self.app_config = replace(self.app_config, active_model=context["model_key"])
+            self._persist_config()
+
+        self._replace_state(
+            status=STATUS_READY,
+            active_model=context["model_key"],
+            error_message=None,
+        )
+
+        if context["announce_success"]:
+            self.tray_controller.show_message(
+                "Voz a Texto",
+                f"Modelo activo: {context['model_label']}",
+            )
+
+        if not self._native_typing_support_checked:
+            self._native_typing_support_checked = True
+            self._validate_native_typing_support()
+
+    def _handle_model_load_failed(self, context):
+        self._model_load_in_progress = False
+        self.set_error(context["message"])
+        self.tray_controller.show_message("Voz a Texto", context["message"])
+
+    def _export_transcript(self):
+        if not self.transcript_store.can_export:
+            self.tray_controller.show_message(
+                "Voz a Texto",
+                "Aun no hay ninguna transcripcion para exportar.",
+            )
+            return
+
+        default_path = Path.home() / "transcripcion.txt"
+        target_path, _selected_filter = QFileDialog.getSaveFileName(
+            self.settings_window,
+            "Exportar transcripcion",
+            str(default_path),
+            "Text Files (*.txt);;All Files (*)",
+        )
+        if not target_path:
+            return
+
+        try:
+            self.transcript_store.export_to_file(target_path)
+        except (OSError, ValueError) as exc:
+            self._replace_state(error_message=f"No se pudo exportar el texto: {exc}")
+            self.tray_controller.show_message("Voz a Texto", "No se pudo exportar la transcripcion.")
+            return
+
+        self._replace_state(error_message=None)
+        self.tray_controller.show_message("Voz a Texto", "Transcripcion exportada correctamente.")
+
+    def _persist_config(self):
+        save_app_config(self.app_config, self.config_path)
+
+    def _sync_native_typing_enabled(self, is_enabled, persist_config):
+        self.app_config = replace(self.app_config, native_typing_enabled=is_enabled)
+        self.runtime_config = replace(self.runtime_config, native_typing_enabled=is_enabled)
+        self.model_manager.runtime_config = self.runtime_config
+        if persist_config:
+            self._persist_config()
+
+    def _sync_launch_at_login(self, is_enabled, persist_config):
+        self.app_config = replace(self.app_config, launch_at_login=is_enabled)
+        self.runtime_config = replace(self.runtime_config, launch_at_login=is_enabled)
+        self.model_manager.runtime_config = self.runtime_config
+        if persist_config:
+            self._persist_config()
+
+    def _reconcile_launch_at_login(self):
+        desired_enabled = self.runtime_config.launch_at_login
+        try:
+            self.autostart_service.sync_enabled(desired_enabled)
+        except AutostartError as exc:
+            if desired_enabled:
+                self._sync_launch_at_login(False, persist_config=True)
+                self._replace_state(launch_at_login=False, error_message=str(exc))
+            else:
+                self._replace_state(error_message=str(exc))
+            self.tray_controller.show_message("Voz a Texto", str(exc))
+
+    def _validate_native_typing_support(self):
+        if not self.runtime_config.native_typing_enabled:
+            return
+
+        environment_error = self.native_typing_service.get_environment_error()
+        if environment_error:
+            self._disable_native_typing(environment_error, persist_config=True)
+
+    def _disable_native_typing(self, message, persist_config, extra_state=None):
+        if self.runtime_config.native_typing_enabled or self.app_config.native_typing_enabled:
+            self._sync_native_typing_enabled(False, persist_config=persist_config)
+
+        changes = {
+            "native_typing_enabled": False,
+            "error_message": message,
+        }
+        if extra_state:
+            changes.update(extra_state)
+        self._replace_state(**changes)
+        self.tray_controller.show_message("Voz a Texto", message)
+
+    def _replace_state(self, **changes):
+        self.shell_state = replace(self.shell_state, **changes)
+        self._apply_state()
+
+    def _apply_state(self):
+        self.settings_window.apply_state(self.shell_state)
+        self.tray_controller.apply_state(self.shell_state)

@@ -1,17 +1,10 @@
 {
   "name": "voice-to-text-backend",
   "version": "0.1.0",
-  "type": "module",
   "private": true,
   "scripts": {
-    "dev": "node --watch src/server.js",
-    "start": "node src/server.js",
-    "test": "node --test src/hotkey-owner.test.js"
-  },
-  "dependencies": {
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
-    "express": "^4.19.2",
-    "ws": "^8.17.1"
+    "desktop": "uv run python scripts/desktop_app.py",
+    "desktop:install": "uv run python scripts/install_desktop.py",
+    "desktop:uninstall": "uv run python scripts/uninstall_desktop.py"
   }
 }

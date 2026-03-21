@@ -1,33 +1,34 @@
 # AGENTS.md - Voz a Texto en Tiempo Real Local
 
 ## Resumen del proyecto
-- Objetivo: App web que captura micrófono y transcribe de manera completamente local y privada usando el modelo STT Fast Conformer Hybrid Large PC de NVIDIA (local).
-- Características Modulares: Captura de dictado con modo "Push-to-Talk" global vía escucha profunda del teclado (presionar Alt+I), transmisión y acumulación de buffers al WebSocket mientras el usuario dicta, modelo ASR ejecutado en subproceso en Python (Node -> Python child_process), transcripción offline del texto y exportación de archivos (.txt). Dictado nativo opcional simulando el teclado en Linux (`xdotool`).
-- Stack: Backend Node.js (Express + ws) corriendo en paralelo al código de Python 3 (NeMo acelerado con PyTorch). Frontend compuesto en React + Vite + TypeScript.
-- Versión mínima: Node.js 18+, Python 3.10+, npm 8+.
+- Objetivo: Aplicacion de escritorio local y privada de voz a texto, residente en bandeja del sistema con `PySide6`.
+- Características Modulares: Push-to-talk global, transcripcion offline, selector entre Fast Conformer ES y Multi-idioma (FastConformer), exportacion de texto y dictado nativo en Linux con `xdotool`.
+- Stack: nucleo Python reutilizable en `backend/voz_a_texto/` y shell desktop PySide en `backend/voz_a_texto/desktop/` con hotkey global, captura de audio local, precarga de modelo, autostart e instalacion local.
+- Versión mínima: Python 3.12+, Node.js 18+ (solo para scripts npm de conveniencia).
 
 ## Setup y desarrollo
-- Instalar dependencias web JS: `npm install` (raíz). Se configuran espacios de trabajo (workspaces).
-- Entorno nativo local en Python (usando la herramienta estricta `uv` e instanciando con `pyproject.toml`): `cd backend && uv sync` (Esto creará automáticamente el entorno virtual y resolverá las dependencias).
-- Iniciar entorno local (servidor de UI y servidor Transcriptor): `npm run dev` (raíz - levanta backend y frontend mediante *concurrently*).
-- Variables de entorno locales: copiar `backend/.env.example` o editar en directo `backend/.env`.
+- Entorno Python (usando `uv` y `pyproject.toml`): `cd backend && uv sync`
+- Iniciar shell desktop: `npm run dev` o `npm run desktop` (raiz).
+- Iniciar directamente: `cd backend && uv run python scripts/desktop_app.py`
+- Variables de entorno locales: `backend/.env` (opcional, la configuracion principal vive en `~/.config/voz-a-texto/config.json`).
+- Dependencias Linux: `PySide6`, `sounddevice`, `pynput`; la captura nativa puede requerir PortAudio disponible en el sistema. `libxcb-cursor0` para Qt en Mint/Ubuntu/Debian. `xdotool` para dictado nativo.
 
 ## Calidad (obligatorio antes de finalizar)
 - Lint: `N/A`
 - Typecheck: `N/A`
-- Tests: `N/A`
-- Build local (si aplica): `npm run build --workspace frontend`
+- Tests Python backend: `cd backend && ./.venv/bin/python -m unittest discover -s tests -t .`
+- Build local (si aplica): `N/A`
 
 ## Convenciones de codigo
-- Lenguaje/estilo: JS ESM en backend; TypeScript/React en frontend; Scripts de machine learning modulares e independientes en Python 3. Adherencia a una arquitectura limpia asincrónica y simplificada.
+- Lenguaje/estilo: Python 3 para todo el proyecto. Adherencia a una arquitectura limpia y modular.
 - Mantener siempre la infraestructura Python controlada y empaquetada estrictamente gestionada bajo el ecosistema de resoluciones `uv`.
-- Arquitectura centralizada: frontend con UI de modo "Push-to-Talk" con control exclusivo a través de un websocket bidireccional, despachando chunks a la capa backend en Node.js, donde este levanta y controla su CLI de Python subyacente para inyectar flujos PCM decodificados en memoria (`stdin`) de manera paralela hasta que finaliza la petición con la transcripción devuelta (`stdout`).
+- Arquitectura: toda la logica de configuracion, ASR y desktop vive en `backend/voz_a_texto/`.
+- `backend/voz_a_texto/desktop/` contiene: `QApplication`, bandeja del sistema, ventana de ajustes, hotkey global con `pynput`, captura local de audio con `sounddevice`, `TranscriptStore`, `NativeTypingService`, `AutostartService`, instalacion local y coordinacion de estado del shell.
 - Las dependencias deberán documentarse si son necesarias.
 
 ## Reglas de cambios
 - No modificar: `node_modules/`, `.venv/` o carpetas temporales para modelos, archivos `.env` (donde haya configuraciones en local absolutas).
-- Evitar: incluir rutas absolutas en repo o subir tokens accidentalmente y modificar el flujo principal del Python subprocess sin la debida consideración.
-- Migraciones: `N/A`
+- Evitar: incluir rutas absolutas en repo o subir tokens accidentalmente.
 
 ## Seguridad y datos
 - Nunca commitear archivos `.env` al menos que contengas variables inofensivas en un archivo `example`.
@@ -35,15 +36,15 @@
 
 ## Flujo de trabajo
 - Commits: `feat/fix/chore` descriptivo.
-- Definicion de terminado: levantamiento sincrono del clúster vite + el motor de Node, subprocesos de Python emitiendo estados de JSON sin crasheos y dictado sobre inputs físicos en Linux garantizado usando keyups sin latencia desmedida. 
+- Definicion de terminado: la app PySide funciona sola, en segundo plano, con todas las caracteristicas (hotkey, dictado, precarga, autostart, instalacion local) sin depender de ningun stack web.
 
 ## Monorepo
-- Package principal: codebase principal con workspaces `backend` y `frontend` nativos de npm. 
-- Comandos ejecutables cruzados: `npm run <cmd> --workspace <nombre-proyecto>`
+- Package principal: raiz con workspace `backend` de npm para scripts de conveniencia.
+- Comandos: `npm run dev`, `npm run desktop`, `npm run desktop:install`, `npm run desktop:uninstall`.
 - Prestigio de documento: Éste AGENTS.md dicta el rumbo.
 
 ## Referencias
 - README: `./README.md`
-- PLAN: Documentos en `docs/superpowers/plans/`.
-- Arquitectura Central: `backend/src/server.js`, `frontend/src/App.tsx`, `backend/scripts/transcribe.py`.
+- Plan PySide: `./docs/plan-migracion-pyside.md`
+- Arquitectura Central: `backend/voz_a_texto/`, `backend/voz_a_texto/desktop/`, `backend/scripts/desktop_app.py`.
 - CI/CD: `N/A`
