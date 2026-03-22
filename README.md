@@ -1,19 +1,16 @@
 # Voz a Texto en Tiempo Real Local
 
-Aplicacion de escritorio local y privada para capturar audio del microfono y transcribirlo offline con NVIDIA NeMo. Reside en la bandeja del sistema, sin necesidad de navegador ni servidor.
+Aplicacion de escritorio local y privada para capturar audio del microfono y transcribirlo offline con NVIDIA NeMo y OpenAI Whisper. Reside en la bandeja del sistema, sin necesidad de navegador ni servidor.
 
 ## Estructura
 - `backend/voz_a_texto/`: nucleo Python reutilizable para configuracion, modelos ASR y shell de escritorio PySide.
 - `backend/voz_a_texto/desktop/`: shell de escritorio con bandeja, hotkey global, captura nativa de audio y dictado.
 - `backend/scripts/`: entrypoints del shell desktop, instalacion y desinstalacion.
-- `backend/`: servidor Node.js legado (en proceso de retiro).
-- `frontend/`: app React + Vite legada (en proceso de retiro).
 - `docs/`: plan de migracion y documentacion de seguimiento.
 
 ## Requisitos
 - Python 3.12+
 - `uv` para el entorno Python del backend
-- Node.js 18+ y npm 8+ (solo para los scripts de conveniencia raiz)
 - `PySide6` (se instala con `uv sync`)
 - `libxcb-cursor0` en Linux Mint/Ubuntu/Debian para que Qt pueda cargar el plugin `xcb`
 - `xdotool` en Linux si quieres dictado nativo
@@ -23,22 +20,17 @@ Aplicacion de escritorio local y privada para capturar audio del microfono y tra
 
 ### 1. Preparar el entorno
 ```bash
-npm install           # dependencias JS de conveniencia
-cd backend && uv sync # entorno Python con todas las dependencias
-cd ..
+cd backend && uv sync
 ```
 
 ### 2. Arrancar el shell desktop
 ```bash
-npm run dev
-# o equivalentemente:
-npm run desktop
+cd backend && uv run python scripts/desktop_app.py
 ```
 
-Tambien puedes lanzarlo directamente:
+Tambien puedes lanzarlo con npm (scripts de conveniencia):
 ```bash
-cd backend
-uv run python scripts/desktop_app.py
+npm run dev
 ```
 
 La app inicia minimizada en la bandeja del sistema, precarga el modelo ASR y queda lista para push-to-talk con `Ctrl+Space`.
@@ -72,17 +64,22 @@ Elimina launcher, entrada de aplicaciones y autostart, pero **conserva** `~/.con
 - **Dictado nativo:** la transcripcion se escribe directamente en la ventana enfocada con `xdotool`.
 - **Bandeja del sistema:** estado del modelo, selector de modelo, toggles y exportacion desde la bandeja.
 - **Precarga del modelo:** el modelo ASR se carga al arrancar para eliminar el cold start.
-- **Dos modelos soportados:** `Fast Conformer ES` (default, español) y `Multi-idioma (FastConformer)` (ingles).
 - **Cambio de modelo en caliente:** cambiar entre modelos sin reiniciar, con fallback al anterior si falla.
 - **Autostart:** opcion para iniciar con la sesion creando `.desktop` en `~/.config/autostart/`.
 - **Exportacion de texto:** historial acumulado exportable a `.txt`.
 - **Instancia unica:** solo un proceso puede controlar hotkey y microfono a la vez.
+- **Tema premium:** interfaz minimalista con paleta terrosa (verde bosque, sage, tostado y crema).
 
 ## Modelos soportados
+
 | Modelo | Clave | Descripcion |
 |--------|-------|-------------|
 | Fast Conformer ES | `fastconformer_es` | `nvidia/stt_es_fastconformer_hybrid_large_pc` — default, español |
-| Multi-idioma (FastConformer) | `parakeet_v3` | `nvidia/parakeet-tdt-0.6b-v3` — ingles |
+| Whisper Tiny | `whisper_tiny` | `tiny` — multilenguaje, muy rapido, ~75 MB |
+| Whisper Base | `whisper_base` | `base` — multilenguaje, rapido, ~142 MB |
+| Whisper Small | `whisper_small` | `small` — multilenguaje, equilibrado, ~244 MB |
+| Whisper Medium | `whisper_medium` | `medium` — multilenguaje, preciso, ~760 MB |
+| Parakeet V3 | `parakeet_v3` | `nvidia/parakeet-tdt-0.6b-v3` — solo ingles, preciso, ~1.2 GB |
 
 El modelo activo se configura desde la bandeja, los ajustes, o en `~/.config/voz-a-texto/config.json`.
 
@@ -99,29 +96,6 @@ La app guarda ajustes en `~/.config/voz-a-texto/config.json`:
 }
 ```
 
-## Flujo web legado (en proceso de retiro)
-
-Si necesitas comparar contra el flujo anterior (React + Node + WebSocket):
-
-```bash
-npm run dev:web
-```
-
-Frontend: `http://localhost:5173`  
-Backend: `http://127.0.0.1:8787`
-
-> **Nota:** El flujo web se mantiene temporalmente para referencia de paridad funcional. El camino principal de ejecucion es el shell desktop PySide.
-
-### Variables de entorno del backend web legado
-- `PORT`: puerto HTTP. Default `8787`.
-- `HOST`: host. Default `127.0.0.1`.
-- `FRONTEND_ORIGIN`: CORS. Default `http://localhost:5173`.
-- `GLOBAL_HOTKEY_ENABLED`: hotkey global en Linux. Default `true`.
-- `NATIVE_TYPE_ENABLED`: dictado nativo. Default `true`.
-- `NATIVE_TYPE_CMD`: comando de tipeo. Default `xdotool`.
-- `ASR_MODEL_ID`: modelo ASR. Default `nvidia/stt_es_fastconformer_hybrid_large_pc`.
-- `ASR_MAX_AUDIO_SEC`: limite de audio. Default `30`.
-
 ## Dependencias del sistema y limitaciones
 
 | Dependencia | Uso | Instalacion |
@@ -137,11 +111,8 @@ Backend: `http://127.0.0.1:8787`
 
 ## Calidad
 ```bash
-# Tests Python del backend (55 tests)
+# Tests Python del backend
 cd backend && ./.venv/bin/python -m unittest discover -s tests -t .
-
-# Tests Node del backend legado
-npm run test --workspace backend
 ```
 
 ## Estado de migracion a PySide
@@ -152,9 +123,8 @@ Todas las fases del plan de migracion estan implementadas y validadas:
 - **Fase 1:** nucleo Python reutilizable (`AppConfig`, `ModelManager`, catalogo de modelos) ✅
 - **Fase 2:** shell desktop (`QApplication`, instancia unica, bandeja, ventana de ajustes) ✅
 - **Fase 3:** hotkey global y captura nativa de audio con `sounddevice` ✅
-- **Fase 4:** precarga de modelo y cambio seguro entre Fast Conformer y Parakeet ✅
+- **Fase 4:** precarga de modelo y cambio seguro entre modelos ✅
 - **Fase 5:** dictado nativo con `xdotool` y deteccion de entornos incompatibles ✅
 - **Fase 6:** autostart con `.desktop`, endurecimiento del arranque, `npm run desktop` como camino principal ✅
 - **Fase 7:** instalacion local para Linux con `uv`, launcher, entrada de aplicaciones y desinstalacion limpia ✅
-
-**Pendiente:** retiro definitivo del codigo web (React, Node, WebSocket) cuando la paridad funcional sea aceptada.
+- **Fase 8:** rediseño de interfaz premium con tema terroso (FramelessWindow, paleta forest/sage/cream) ✅
