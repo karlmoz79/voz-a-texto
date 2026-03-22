@@ -142,7 +142,7 @@ class DesktopInstallationService:
             "Type=Application\n"
             "Version=1.0\n"
             f"Name={APP_DISPLAY_NAME}\n"
-            "Comment=Shell desktop local de Voz a Texto\n"
+            f"Comment=Shell desktop local de {APP_DISPLAY_NAME}\n"
             f"TryExec={escaped_launcher}\n"
             f"Exec={escaped_launcher}\n"
             "Terminal=false\n"

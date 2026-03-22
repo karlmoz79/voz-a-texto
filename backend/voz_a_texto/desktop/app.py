@@ -12,20 +12,20 @@ from pathlib import Path
 def main(argv=None):
     argv_list = argv or sys.argv
     app = QApplication(argv_list)
-    app.setApplicationDisplayName("Voz a Texto")
-    app.setApplicationName("voz-a-texto")
+    app.setApplicationDisplayName("VoxFlow")
+    app.setApplicationName("vox-flow")
     app.setQuitOnLastWindowClosed(False)
 
     guard = SingleInstanceGuard()
     if not guard.try_acquire():
         if "--ui" in argv_list:
             socket = QLocalSocket()
-            socket.connectToServer("voz_a_texto_ipc")
+            socket.connectToServer("vox_flow_ipc")
             if socket.waitForConnected(500):
                 socket.write(b"show_ui")
                 socket.waitForBytesWritten(500)
                 socket.disconnectFromServer()
-        print("Voz a Texto ya se esta ejecutando.", file=sys.stderr)
+        print("VoxFlow ya se esta ejecutando.", file=sys.stderr)
         return 1
 
     app.aboutToQuit.connect(guard.release)

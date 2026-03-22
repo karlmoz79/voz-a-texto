@@ -44,7 +44,7 @@ class AutostartServiceTestCase(unittest.TestCase):
             self.assertEqual(entry_path.name, AUTOSTART_FILENAME)
             self.assertTrue(entry_path.exists())
             entry_text = entry_path.read_text(encoding="utf-8")
-            self.assertIn("Name=Voz a Texto", entry_text)
+            self.assertIn("Name=VoxFlow", entry_text)
             self.assertIn(f'Exec="{python_path}" "{script_path}"', entry_text)
 
     def test_disable_removes_existing_autostart_file(self):

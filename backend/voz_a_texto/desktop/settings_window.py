@@ -237,7 +237,7 @@ class SettingsWindow(QWidget):
         sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(0, 24, 0, 24)
 
-        self.logo_lbl = QLabel("voxflow.")
+        self.logo_lbl = QLabel("VoxFlow")
         self.logo_lbl.setObjectName("appLogo")
         self.logo_lbl.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter

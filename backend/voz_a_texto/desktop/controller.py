@@ -12,10 +12,12 @@ from ..asr import ModelManager
 from ..models import get_model_profile
 from .autostart import AutostartError, AutostartService
 from .audio_capture import AudioCaptureService, get_input_devices
+from .paths import APP_DISPLAY_NAME
 from .hotkey_service import GlobalHotkeyService
 from .native_typing import NativeTypingError, NativeTypingService
 from .transcript_store import TranscriptStore
 from .settings_window import SettingsWindow
+from .recording_popup import RecordingPopup
 from .state import (
     STATUS_ERROR,
     STATUS_LOADING,
@@ -44,7 +46,7 @@ class DesktopShellController(QObject):
         self.config_path = config_path
         self.app_config = load_app_config(config_path)
         self.runtime_config = resolve_runtime_config(stored_config=self.app_config)
-        
+
         downloaded_models = self._check_downloaded_models()
         self.shell_state = create_shell_state(
             self.runtime_config,
@@ -63,6 +65,10 @@ class DesktopShellController(QObject):
         self._native_typing_support_checked = False
 
         self.settings_window = SettingsWindow()
+        self.recording_popup = RecordingPopup()
+        self.recording_popup.set_callbacks(
+            on_stop=self.handle_recording_stop, on_cancel=self.handle_recording_cancel
+        )
         self.tray_controller = TrayController(parent=app)
 
         self.start_beep = QSoundEffect(self)
@@ -94,8 +100,8 @@ class DesktopShellController(QObject):
         self.hotkey_service.start()
 
         self.ipc_server = QLocalServer()
-        self.ipc_server.removeServer("voz_a_texto_ipc")
-        if self.ipc_server.listen("voz_a_texto_ipc"):
+        self.ipc_server.removeServer("vox_flow_ipc")
+        if self.ipc_server.listen("vox_flow_ipc"):
             self.ipc_server.newConnection.connect(self._on_ipc_connection)
 
     def _on_ipc_connection(self):
@@ -158,7 +164,9 @@ class DesktopShellController(QObject):
         self.hotkey_service.activated.connect(self._handle_hotkey_pressed)
         self.hotkey_service.released.connect(self._handle_hotkey_released)
         self.hotkey_service.error.connect(self.set_error)
-        self.transcription_signals.completed.connect(self._handle_transcription_completed)
+        self.transcription_signals.completed.connect(
+            self._handle_transcription_completed
+        )
         self.transcription_signals.failed.connect(self._handle_transcription_failed)
         self.model_load_signals.completed.connect(self._handle_model_load_completed)
         self.model_load_signals.failed.connect(self._handle_model_load_failed)
@@ -178,14 +186,14 @@ class DesktopShellController(QObject):
 
         if self.shell_state.status in {STATUS_RECORDING, STATUS_PROCESSING}:
             self.tray_controller.show_message(
-                "Voz a Texto",
+                APP_DISPLAY_NAME,
                 "No se puede cambiar el modelo mientras hay un dictado en curso.",
             )
             return
 
         if self._model_load_in_progress:
             self.tray_controller.show_message(
-                "Voz a Texto",
+                APP_DISPLAY_NAME,
                 "Ya hay una carga de modelo en progreso.",
             )
             return
@@ -195,6 +203,7 @@ class DesktopShellController(QObject):
     def _check_downloaded_models(self):
         from ..models import MODEL_PROFILES
         from ..asr import is_model_downloaded
+
         downloaded = []
         for profile in MODEL_PROFILES.values():
             if is_model_downloaded(profile.model_id):
@@ -204,22 +213,21 @@ class DesktopShellController(QObject):
     def _delete_model(self, model_key):
         from ..models import get_model_profile
         from ..asr import delete_model_cache
-        
+
         profile = get_model_profile(model_key)
-        
+
         success = delete_model_cache(profile.model_id)
         if success:
             downloaded = self._check_downloaded_models()
             self._replace_state(downloaded_models=downloaded)
             self.settings_window.show_delete_success()
             self.tray_controller.show_message(
-                "Voz a Texto",
-                f"Archivos de {profile.label} eliminados del disco."
+                APP_DISPLAY_NAME, f"Archivos de {profile.label} eliminados del disco."
             )
         else:
             self.tray_controller.show_message(
-                "Voz a Texto",
-                f"El modelo {profile.label} no ocupaba espacio localmente."
+                APP_DISPLAY_NAME,
+                f"El modelo {profile.label} no ocupaba espacio localmente.",
             )
 
     def _set_mic_selected(self, mic_name):
@@ -254,12 +262,12 @@ class DesktopShellController(QObject):
         try:
             self.hotkey_service.update_hotkey(new_hotkey)
         except ValueError as exc:
-            self.tray_controller.show_message("Voz a Texto", f"Atajo invalido: {exc}")
+            self.tray_controller.show_message(APP_DISPLAY_NAME, f"Atajo invalido: {exc}")
             self.settings_window.apply_state(self.shell_state)
             return
         except Exception as exc:
             self.tray_controller.show_message(
-                "Voz a Texto", f"Error al cambiar atajo: {exc}"
+                APP_DISPLAY_NAME, f"Error al cambiar atajo: {exc}"
             )
             self.settings_window.apply_state(self.shell_state)
             return
@@ -269,7 +277,7 @@ class DesktopShellController(QObject):
         save_app_config(self.app_config, self.config_path)
         self._replace_state(hotkey=new_hotkey)
         self.tray_controller.show_message(
-            "Voz a Texto", f"Atajo actualizado: {new_hotkey}"
+            APP_DISPLAY_NAME, f"Atajo actualizado: {new_hotkey}"
         )
 
     def _set_launch_at_login(self, is_enabled):
@@ -280,13 +288,13 @@ class DesktopShellController(QObject):
             self.autostart_service.sync_enabled(is_enabled)
         except AutostartError as exc:
             self._replace_state(error_message=str(exc))
-            self.tray_controller.show_message("Voz a Texto", str(exc))
+            self.tray_controller.show_message(APP_DISPLAY_NAME, str(exc))
             return
 
         self._sync_launch_at_login(is_enabled, persist_config=True)
         self._replace_state(launch_at_login=is_enabled)
         self.tray_controller.show_message(
-            "Voz a Texto",
+            APP_DISPLAY_NAME,
             "Inicio automatico activado."
             if is_enabled
             else "Inicio automatico desactivado.",
@@ -300,7 +308,7 @@ class DesktopShellController(QObject):
     def _handle_hotkey_pressed(self):
         if self.shell_state.status == STATUS_LOADING or self._model_load_in_progress:
             self.tray_controller.show_message(
-                "Voz a Texto",
+                APP_DISPLAY_NAME,
                 "El modelo aun se esta cargando. Intenta de nuevo en unos segundos.",
             )
             return
@@ -314,43 +322,63 @@ class DesktopShellController(QObject):
                 or "Aun no hay ningun modelo listo para transcribir."
             )
             self.set_error(message)
-            self.tray_controller.show_message("Voz a Texto", message)
+            self.tray_controller.show_message(APP_DISPLAY_NAME, message)
             return
 
         self.clear_error()
         start_error = self.audio_capture_service.start_recording(
             self.runtime_config.max_audio_sec,
-            input_device=self.runtime_config.input_device
+            input_device=self.runtime_config.input_device,
         )
         if start_error:
             self.set_error(start_error)
-            self.tray_controller.show_message("Voz a Texto", start_error)
+            self.tray_controller.show_message(APP_DISPLAY_NAME, start_error)
             return
 
         self.start_beep.play()
+        self.recording_popup.show()
         self._replace_state(
             status=STATUS_RECORDING, error_message=None, current_transcript=""
         )
 
     def _handle_hotkey_released(self):
+        """
+        No detenemos la grabación al soltar las teclas.
+        La grabación continúa hasta que se pulse el botón de Stop o Cancelar en el popup.
+        """
+        pass
+
+    def handle_recording_cancel(self):
+        """Descarta la grabación actual sin procesar."""
+        if self.shell_state.status != STATUS_RECORDING:
+            return
+
+        self.audio_capture_service.stop_recording()
+        self.recording_popup.hide()
+        self._replace_state(status=STATUS_READY, error_message=None)
+
+    def handle_recording_stop(self):
+        """Detiene la grabación y procesa el audio."""
         if self.shell_state.status != STATUS_RECORDING:
             return
 
         capture_result = self.audio_capture_service.stop_recording()
+        self.recording_popup.hide()
         if capture_result.error_message:
             self.set_error(capture_result.error_message)
             self.tray_controller.show_message(
-                "Voz a Texto", capture_result.error_message
+                APP_DISPLAY_NAME, capture_result.error_message
             )
             return
 
         if capture_result.too_long:
             message = f"El audio supero el maximo de {self.runtime_config.max_audio_sec} segundos."
             self.set_error(message)
-            self.tray_controller.show_message("Voz a Texto", message)
+            self.tray_controller.show_message(APP_DISPLAY_NAME, message)
             return
 
         if not capture_result.audio_bytes:
+            self.recording_popup.hide()
             self._replace_state(status=STATUS_READY, error_message=None)
             return
 
@@ -375,6 +403,7 @@ class DesktopShellController(QObject):
         self.transcription_signals.completed.emit(text)
 
     def _handle_transcription_completed(self, text):
+        self.recording_popup.hide()
         if text:
             self.transcript_store.append(text)
             next_transcript = self.transcript_store.full_text
@@ -400,7 +429,7 @@ class DesktopShellController(QObject):
                             current_transcript=text,
                             error_message=str(exc),
                         )
-                        self.tray_controller.show_message("Voz a Texto", str(exc))
+                        self.tray_controller.show_message(APP_DISPLAY_NAME, str(exc))
                     return
                 except Exception as exc:
                     message = f"No se pudo dictar el texto en la ventana activa: {exc}"
@@ -410,7 +439,7 @@ class DesktopShellController(QObject):
                         current_transcript=text,
                         error_message=message,
                     )
-                    self.tray_controller.show_message("Voz a Texto", message)
+                    self.tray_controller.show_message(APP_DISPLAY_NAME, message)
                     return
 
             self._replace_state(
@@ -422,11 +451,14 @@ class DesktopShellController(QObject):
             self.complete_beep.play()
             return
 
-        self._replace_state(status=STATUS_READY, current_transcript="", error_message=None)
+        self._replace_state(
+            status=STATUS_READY, current_transcript="", error_message=None
+        )
 
     def _handle_transcription_failed(self, message):
+        self.recording_popup.hide()
         self.set_error(message)
-        self.tray_controller.show_message("Voz a Texto", message)
+        self.tray_controller.show_message(APP_DISPLAY_NAME, message)
 
     def _preload_active_model(self):
         if self._model_load_in_progress:
@@ -496,7 +528,7 @@ class DesktopShellController(QObject):
 
         if context["announce_success"]:
             self.tray_controller.show_message(
-                "Voz a Texto",
+                APP_DISPLAY_NAME,
                 f"Modelo activo: {context['model_label']}",
             )
 
@@ -507,12 +539,12 @@ class DesktopShellController(QObject):
     def _handle_model_load_failed(self, context):
         self._model_load_in_progress = False
         self.set_error(context["message"])
-        self.tray_controller.show_message("Voz a Texto", context["message"])
+        self.tray_controller.show_message(APP_DISPLAY_NAME, context["message"])
 
     def _export_transcript(self):
         if not self.transcript_store.can_export:
             self.tray_controller.show_message(
-                "Voz a Texto",
+                APP_DISPLAY_NAME,
                 "Aun no hay ninguna transcripcion para exportar.",
             )
             return
@@ -532,13 +564,13 @@ class DesktopShellController(QObject):
         except (OSError, ValueError) as exc:
             self._replace_state(error_message=f"No se pudo exportar el texto: {exc}")
             self.tray_controller.show_message(
-                "Voz a Texto", "No se pudo exportar la transcripcion."
+                APP_DISPLAY_NAME, "No se pudo exportar la transcripcion."
             )
             return
 
         self._replace_state(error_message=None)
         self.tray_controller.show_message(
-            "Voz a Texto", "Transcripcion exportada correctamente."
+            APP_DISPLAY_NAME, "Transcripcion exportada correctamente."
         )
 
     def _clear_transcript(self):
@@ -574,7 +606,7 @@ class DesktopShellController(QObject):
                 self._replace_state(launch_at_login=False, error_message=str(exc))
             else:
                 self._replace_state(error_message=str(exc))
-            self.tray_controller.show_message("Voz a Texto", str(exc))
+            self.tray_controller.show_message(APP_DISPLAY_NAME, str(exc))
 
     def _validate_native_typing_support(self):
         if not self.runtime_config.native_typing_enabled:
@@ -598,7 +630,7 @@ class DesktopShellController(QObject):
         if extra_state:
             changes.update(extra_state)
         self._replace_state(**changes)
-        self.tray_controller.show_message("Voz a Texto", message)
+        self.tray_controller.show_message(APP_DISPLAY_NAME, message)
 
     def _replace_state(
         self,

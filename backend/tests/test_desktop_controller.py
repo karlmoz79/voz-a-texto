@@ -58,6 +58,28 @@ class FakeSettingsWindow:
         self.presented = True
 
 
+class FakeRecordingPopup:
+    def __init__(self):
+        self.shown = False
+        self.hidden = False
+        self._stop_callback = None
+        self._cancel_callback = None
+
+    def show(self):
+        self.shown = True
+
+    def hide(self):
+        self.hidden = True
+
+    def set_stop_callback(self, callback):
+        self._stop_callback = callback
+
+    def set_callbacks(self, on_stop, on_cancel=None):
+        self._stop_callback = on_stop
+        self._cancel_callback = on_cancel
+
+
+
 class FakeTrayController:
     def __init__(self, parent=None):
         self.parent = parent
@@ -101,15 +123,25 @@ class FakeAudioCaptureService:
     def __init__(self):
         self.is_recording = False
         self.start_calls = []
+        self.current_level = 0.0
 
-    def start_recording(self, max_audio_sec):
+    def start_recording(self, max_audio_sec, input_device=None):
         self.start_calls.append(max_audio_sec)
         self.is_recording = True
         return None
 
     def stop_recording(self):
         self.is_recording = False
-        return None
+
+        class FakeResult:
+            def __init__(self):
+                self.audio_bytes = b"fake-audio-content"
+                self.too_long = False
+                self.error_message = None
+
+        return FakeResult()
+
+
 
 
 class FakeModelManager:
@@ -186,6 +218,7 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         )
         self.patchers = [
             patch("voz_a_texto.desktop.controller.SettingsWindow", FakeSettingsWindow),
+            patch("voz_a_texto.desktop.controller.RecordingPopup", FakeRecordingPopup),
             patch("voz_a_texto.desktop.controller.TrayController", FakeTrayController),
             patch(
                 "voz_a_texto.desktop.controller.GlobalHotkeyService", FakeHotkeyService
@@ -249,7 +282,7 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         self.assertEqual(persisted_config.active_model, WHISPER_SMALL_KEY)
         self.assertEqual(
             self.controller.tray_controller.messages[-1],
-            ("Voz a Texto", "Modelo activo: Multi-idioma (Whisper Small)"),
+            ("VoxFlow", "Modelo activo: Multi-idioma (Whisper Small)"),
         )
 
     def test_set_active_model_retries_when_selected_model_is_not_loaded(self):
@@ -274,7 +307,7 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         self.assertEqual(self.controller.app_config.active_model, FASTCONFORMER_ES_KEY)
         self.assertEqual(
             self.controller.tray_controller.messages[-1],
-            ("Voz a Texto", "No se pudo cargar: boom"),
+            ("VoxFlow", "No se pudo cargar: boom"),
         )
 
     def test_set_launch_at_login_persists_when_autostart_succeeds(self):
@@ -288,7 +321,7 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         self.assertTrue(persisted_config.launch_at_login)
         self.assertEqual(
             self.controller.tray_controller.messages[-1],
-            ("Voz a Texto", "Inicio automatico activado."),
+            ("VoxFlow", "Inicio automatico activado."),
         )
 
     def test_set_launch_at_login_keeps_previous_state_when_autostart_fails(self):
@@ -310,7 +343,7 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         self.assertEqual(
             self.controller.tray_controller.messages[-1],
             (
-                "Voz a Texto",
+                "VoxFlow",
                 "No se pudo escribir el archivo de autostart: permiso denegado",
             ),
         )
@@ -363,7 +396,7 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         self.assertEqual(
             self.controller.tray_controller.messages[-1],
             (
-                "Voz a Texto",
+                "VoxFlow",
                 "No se encontro el interprete de Python para autostart: /missing/python",
             ),
         )
@@ -407,7 +440,7 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         self.assertEqual(
             self.controller.tray_controller.messages[-1],
             (
-                "Voz a Texto",
+                "VoxFlow",
                 "No hay una ventana enfocada compatible para dictado nativo.",
             ),
         )
@@ -434,7 +467,7 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         self.assertEqual(
             self.controller.tray_controller.messages[-1],
             (
-                "Voz a Texto",
+                "VoxFlow",
                 "No se encontro `xdotool` en PATH. Instala xdotool para usar dictado nativo.",
             ),
         )
@@ -453,6 +486,39 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         self.controller.transcript_store.append("texto nuevo")
         self.assertEqual(self.controller.transcript_store.count, 1)
         self.assertEqual(self.controller.transcript_store.full_text, "texto nuevo")
+
+
+    def test_hotkey_release_does_not_stop_recording(self):
+        self.controller.model_manager.loaded = True
+        self.controller._handle_hotkey_pressed()
+        self.assertTrue(self.controller.audio_capture_service.is_recording)
+
+        self.controller._handle_hotkey_released()
+        # La grabación debe continuar (nueva funcionalidad)
+        self.assertTrue(self.controller.audio_capture_service.is_recording)
+
+    def test_handle_recording_stop_stops_and_processes(self):
+        self.controller.model_manager.loaded = True
+        self.controller._handle_hotkey_pressed()
+
+        with patch("voz_a_texto.desktop.controller.threading.Thread") as MockThread:
+            self.controller.handle_recording_stop()
+            self.assertFalse(self.controller.audio_capture_service.is_recording)
+            self.assertTrue(self.controller.recording_popup.hidden)
+            # Debe iniciar el hilo de procesamiento
+            MockThread.assert_called_once()
+
+    def test_handle_recording_cancel_stops_without_processing(self):
+        self.controller.model_manager.loaded = True
+        self.controller._handle_hotkey_pressed()
+
+        with patch("voz_a_texto.desktop.controller.threading.Thread") as MockThread:
+            self.controller.handle_recording_cancel()
+            self.assertFalse(self.controller.audio_capture_service.is_recording)
+            self.assertTrue(self.controller.recording_popup.hidden)
+            # No debe iniciar procesamiento
+            MockThread.assert_not_called()
+            self.assertEqual(self.controller.shell_state.status, STATUS_READY)
 
 
 if __name__ == "__main__":

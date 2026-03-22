@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 import sys
 
-from .paths import DESKTOP_ENTRY_FILENAME, default_home_dir, default_launcher_path
+from .paths import APP_DISPLAY_NAME, DESKTOP_ENTRY_FILENAME, default_home_dir, default_launcher_path
 
 AUTOSTART_FILENAME = DESKTOP_ENTRY_FILENAME
 
@@ -103,8 +103,8 @@ class AutostartService:
             "[Desktop Entry]\n"
             "Type=Application\n"
             "Version=1.0\n"
-            "Name=Voz a Texto\n"
-            "Comment=Shell desktop local de Voz a Texto\n"
+            f"Name={APP_DISPLAY_NAME}\n"
+            f"Comment=Shell desktop local de {APP_DISPLAY_NAME}\n"
             f"TryExec={try_exec}\n"
             f"Exec={exec_command}\n"
             "Terminal=false\n"

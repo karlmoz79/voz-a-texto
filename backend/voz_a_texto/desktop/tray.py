@@ -12,6 +12,7 @@ from .state import (
     STATUS_RECORDING,
     status_label,
 )
+from .paths import APP_DISPLAY_NAME
 
 
 class TrayController(QObject):
@@ -101,7 +102,7 @@ class TrayController(QObject):
     def apply_state(self, shell_state):
         label = status_label(shell_state.status)
         self.status_action.setText(f"Estado: {label}")
-        self.tray_icon.setToolTip(f"Voz a Texto - {label}")
+        self.tray_icon.setToolTip(f"{APP_DISPLAY_NAME} - {label}")
         self.export_action.setEnabled(shell_state.can_export)
         self._set_checkable_action(
             self.native_typing_action, shell_state.native_typing_enabled

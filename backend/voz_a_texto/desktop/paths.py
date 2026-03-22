@@ -2,8 +2,8 @@ import os
 from pathlib import Path
 
 
-APP_DISPLAY_NAME = "Voz a Texto"
-APP_SLUG = "voz-a-texto"
+APP_DISPLAY_NAME = "VoxFlow"
+APP_SLUG = "vox-flow"
 LAUNCHER_FILENAME = APP_SLUG
 DESKTOP_ENTRY_FILENAME = f"{APP_SLUG}.desktop"
 
