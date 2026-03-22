@@ -42,3 +42,9 @@ backend/temp_audio/
 dist/
 build/
 *.spec
+
+# Documentation and Internal Plans
+docs/
+correcciones.md
+implementation_plan.md
+prompt_rediseno_ui.md
