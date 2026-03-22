@@ -321,6 +321,7 @@ dependencies = [
     { name = "onnxruntime" },
     { name = "pynput" },
     { name = "pyside6" },
+    { name = "qtvscodestyle" },
     { name = "sounddevice" },
     { name = "torch", version = "2.9.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.14'" },
     { name = "torch", version = "2.10.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.14'" },
@@ -336,6 +337,7 @@ requires-dist = [
     { name = "onnxruntime", specifier = ">=1.17.0" },
     { name = "pynput", specifier = ">=1.8.1" },
     { name = "pyside6", specifier = ">=6.8.0" },
+    { name = "qtvscodestyle", specifier = ">=0.1.1" },
     { name = "sounddevice", specifier = ">=0.5.1" },
     { name = "torch", specifier = ">=2.0.0" },
 ]
@@ -3565,6 +3567,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/05/10/f42c48fa5153204f42eaa945e8d1fd7c10d6296841dcb2447bf7da1be5c4/pyyaml_ft-8.0.0-cp313-cp313t-musllinux_1_2_aarch64.whl", hash = "sha256:052561b89d5b2a8e1289f326d060e794c21fa068aa11255fe71d65baf18a632e", size = 810403, upload-time = "2025-06-10T15:32:11.051Z" },
     { url = "https://files.pythonhosted.org/packages/d5/d2/e369064aa51009eb9245399fd8ad2c562bd0bcd392a00be44b2a824ded7c/pyyaml_ft-8.0.0-cp313-cp313t-musllinux_1_2_x86_64.whl", hash = "sha256:3bb4b927929b0cb162fb1605392a321e3333e48ce616cdcfa04a839271373255", size = 835581, upload-time = "2025-06-10T15:32:12.897Z" },
     { url = "https://files.pythonhosted.org/packages/c0/28/26534bed77109632a956977f60d8519049f545abc39215d086e33a61f1f2/pyyaml_ft-8.0.0-cp313-cp313t-win_amd64.whl", hash = "sha256:de04cfe9439565e32f178106c51dd6ca61afaa2907d143835d501d84703d3793", size = 171579, upload-time = "2025-06-10T15:32:14.34Z" },
+]
+
+[[package]]
+name = "qtvscodestyle"
+version = "0.1.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8c/51/706568380daaaa186397daa5165a0124e3f914f8d2a5783b5c66afc073e3/QtVSCodeStyle-0.1.1.tar.gz", hash = "sha256:f04205c8d21420ac6e6bbd652554df2a57f007ffaf2712ac1a76913da7f8b6ed", size = 387527, upload-time = "2021-10-04T16:43:13.417Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/99/18/f4ace100ccd367377366fc4e21389db9b4eb3e092b63402bbd2f51adadb5/QtVSCodeStyle-0.1.1-py3-none-any.whl", hash = "sha256:f9db2ccf94e87c8b225775c15311730030c6c68c16d3e1ca8ec726d64fa47f5e", size = 526440, upload-time = "2021-10-04T16:43:11.317Z" },
 ]
 
 [[package]]

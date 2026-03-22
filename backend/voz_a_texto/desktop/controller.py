@@ -2,15 +2,16 @@ import threading
 from dataclasses import replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal, QTimer, QDir
+from PySide6.QtCore import QObject, Signal, QTimer, QDir, QUrl
 from PySide6.QtWidgets import QApplication, QFileDialog, QSystemTrayIcon
 from PySide6.QtNetwork import QLocalServer
+from PySide6.QtMultimedia import QSoundEffect
 
 from ..app_config import load_app_config, resolve_runtime_config, save_app_config
 from ..asr import ModelManager
 from ..models import get_model_profile
 from .autostart import AutostartError, AutostartService
-from .audio_capture import AudioCaptureService
+from .audio_capture import AudioCaptureService, get_input_devices
 from .hotkey_service import GlobalHotkeyService
 from .native_typing import NativeTypingError, NativeTypingService
 from .transcript_store import TranscriptStore
@@ -43,7 +44,13 @@ class DesktopShellController(QObject):
         self.config_path = config_path
         self.app_config = load_app_config(config_path)
         self.runtime_config = resolve_runtime_config(stored_config=self.app_config)
-        self.shell_state = create_shell_state(self.runtime_config)
+        
+        downloaded_models = self._check_downloaded_models()
+        self.shell_state = create_shell_state(
+            self.runtime_config,
+            downloaded_models=downloaded_models,
+            input_devices_list=tuple(get_input_devices()),
+        )
         self.model_manager = ModelManager(self.runtime_config)
         self.audio_capture_service = AudioCaptureService()
         self.hotkey_service = GlobalHotkeyService(self.runtime_config.hotkey)
@@ -57,6 +64,23 @@ class DesktopShellController(QObject):
 
         self.settings_window = SettingsWindow()
         self.tray_controller = TrayController(parent=app)
+
+        self.start_beep = QSoundEffect(self)
+        self.start_beep.setSource(
+            QUrl.fromLocalFile(
+                str(Path(__file__).parent.parent.parent / "assets" / "notification.wav")
+            )
+        )
+        self.start_beep.setVolume(0.8)
+
+        self.complete_beep = QSoundEffect(self)
+        self.complete_beep.setSource(
+            QUrl.fromLocalFile(
+                str(Path(__file__).parent.parent.parent / "assets" / "notification.wav")
+            )
+        )
+        self.complete_beep.setVolume(0.5)
+
         self._wire_signals()
         self._apply_state()
 
@@ -68,7 +92,7 @@ class DesktopShellController(QObject):
         self._reconcile_launch_at_login()
         self._preload_active_model()
         self.hotkey_service.start()
-        
+
         self.ipc_server = QLocalServer()
         self.ipc_server.removeServer("voz_a_texto_ipc")
         if self.ipc_server.listen("voz_a_texto_ipc"):
@@ -77,13 +101,12 @@ class DesktopShellController(QObject):
     def _on_ipc_connection(self):
         socket = self.ipc_server.nextPendingConnection()
         socket.readyRead.connect(lambda: self._handle_ipc(socket))
-        
+
     def _handle_ipc(self, socket):
         msg = socket.readAll().data().decode("utf-8")
         if msg == "show_ui":
             self.show_settings()
             self.settings_window.raise_()
-        socket.disconnectFromServer()
 
     def shutdown(self):
         self.hotkey_service.stop()
@@ -101,7 +124,11 @@ class DesktopShellController(QObject):
         self._replace_state(status=STATUS_ERROR, error_message=message)
 
     def clear_error(self):
-        status = STATUS_READY if self.shell_state.status == STATUS_ERROR else self.shell_state.status
+        status = (
+            STATUS_READY
+            if self.shell_state.status == STATUS_ERROR
+            else self.shell_state.status
+        )
         self._replace_state(status=status, error_message=None)
 
     def _wire_signals(self):
@@ -109,16 +136,24 @@ class DesktopShellController(QObject):
 
         self.tray_controller.show_settings_requested.connect(self.show_settings)
         self.tray_controller.model_selected.connect(self._set_active_model)
-        self.tray_controller.native_typing_toggled.connect(self._set_native_typing_enabled)
+        self.tray_controller.native_typing_toggled.connect(
+            self._set_native_typing_enabled
+        )
         self.tray_controller.autostart_toggled.connect(self._set_launch_at_login)
         self.tray_controller.export_requested.connect(self._export_transcript)
         self.tray_controller.quit_requested.connect(self.app.quit)
 
         self.settings_window.model_selected.connect(self._set_active_model)
-        self.settings_window.native_typing_toggled.connect(self._set_native_typing_enabled)
+        self.settings_window.native_typing_toggled.connect(
+            self._set_native_typing_enabled
+        )
         self.settings_window.autostart_toggled.connect(self._set_launch_at_login)
         self.settings_window.export_requested.connect(self._export_transcript)
+        self.settings_window.clear_requested.connect(self._clear_transcript)
+        self.settings_window.delete_model_requested.connect(self._delete_model)
         self.settings_window.hotkey_changed.connect(self._set_hotkey)
+        self.settings_window.mic_selected.connect(self._set_mic_selected)
+        self.settings_window.language_selected.connect(self._set_language_selected)
 
         self.hotkey_service.activated.connect(self._handle_hotkey_pressed)
         self.hotkey_service.released.connect(self._handle_hotkey_released)
@@ -127,6 +162,10 @@ class DesktopShellController(QObject):
         self.transcription_signals.failed.connect(self._handle_transcription_failed)
         self.model_load_signals.completed.connect(self._handle_model_load_completed)
         self.model_load_signals.failed.connect(self._handle_model_load_failed)
+
+        self.vu_timer = QTimer()
+        self.vu_timer.timeout.connect(self._update_vu_meter)
+        self.vu_timer.start(50)
 
     def _set_active_model(self, model_key):
         profile = get_model_profile(model_key)
@@ -153,6 +192,48 @@ class DesktopShellController(QObject):
 
         self._begin_model_load(profile, persist_config=True, announce_success=True)
 
+    def _check_downloaded_models(self):
+        from ..models import MODEL_PROFILES
+        from ..asr import is_model_downloaded
+        downloaded = []
+        for profile in MODEL_PROFILES.values():
+            if is_model_downloaded(profile.model_id):
+                downloaded.append(profile.key)
+        return tuple(downloaded)
+
+    def _delete_model(self, model_key):
+        from ..models import get_model_profile
+        from ..asr import delete_model_cache
+        
+        profile = get_model_profile(model_key)
+        
+        success = delete_model_cache(profile.model_id)
+        if success:
+            downloaded = self._check_downloaded_models()
+            self._replace_state(downloaded_models=downloaded)
+            self.settings_window.show_delete_success()
+            self.tray_controller.show_message(
+                "Voz a Texto",
+                f"Archivos de {profile.label} eliminados del disco."
+            )
+        else:
+            self.tray_controller.show_message(
+                "Voz a Texto",
+                f"El modelo {profile.label} no ocupaba espacio localmente."
+            )
+
+    def _set_mic_selected(self, mic_name):
+        self.app_config = replace(self.app_config, input_device=mic_name)
+        self.runtime_config = replace(self.runtime_config, input_device=mic_name)
+        self._persist_config()
+        self._replace_state(input_device=mic_name)
+
+    def _set_language_selected(self, lang):
+        self.app_config = replace(self.app_config, language=lang)
+        self.runtime_config = replace(self.runtime_config, language=lang)
+        self._persist_config()
+        self._replace_state(language=lang)
+
     def _set_native_typing_enabled(self, is_enabled):
         if self.app_config.native_typing_enabled == is_enabled:
             return
@@ -177,7 +258,9 @@ class DesktopShellController(QObject):
             self.settings_window.apply_state(self.shell_state)
             return
         except Exception as exc:
-            self.tray_controller.show_message("Voz a Texto", f"Error al cambiar atajo: {exc}")
+            self.tray_controller.show_message(
+                "Voz a Texto", f"Error al cambiar atajo: {exc}"
+            )
             self.settings_window.apply_state(self.shell_state)
             return
 
@@ -185,7 +268,9 @@ class DesktopShellController(QObject):
         self.runtime_config = replace(self.runtime_config, hotkey=new_hotkey)
         save_app_config(self.app_config, self.config_path)
         self._replace_state(hotkey=new_hotkey)
-        self.tray_controller.show_message("Voz a Texto", f"Atajo actualizado: {new_hotkey}")
+        self.tray_controller.show_message(
+            "Voz a Texto", f"Atajo actualizado: {new_hotkey}"
+        )
 
     def _set_launch_at_login(self, is_enabled):
         if self.app_config.launch_at_login == is_enabled:
@@ -202,8 +287,15 @@ class DesktopShellController(QObject):
         self._replace_state(launch_at_login=is_enabled)
         self.tray_controller.show_message(
             "Voz a Texto",
-            "Inicio automatico activado." if is_enabled else "Inicio automatico desactivado.",
+            "Inicio automatico activado."
+            if is_enabled
+            else "Inicio automatico desactivado.",
         )
+
+    def _update_vu_meter(self):
+        if self.shell_state.status == STATUS_RECORDING:
+            val = self.audio_capture_service.current_level * 100
+            self.settings_window.vu_meter.setValue(int(val))
 
     def _handle_hotkey_pressed(self):
         if self.shell_state.status == STATUS_LOADING or self._model_load_in_progress:
@@ -217,19 +309,28 @@ class DesktopShellController(QObject):
             return
 
         if not self.model_manager.has_loaded_model():
-            message = self.shell_state.error_message or "Aun no hay ningun modelo listo para transcribir."
+            message = (
+                self.shell_state.error_message
+                or "Aun no hay ningun modelo listo para transcribir."
+            )
             self.set_error(message)
             self.tray_controller.show_message("Voz a Texto", message)
             return
 
         self.clear_error()
-        start_error = self.audio_capture_service.start_recording(self.runtime_config.max_audio_sec)
+        start_error = self.audio_capture_service.start_recording(
+            self.runtime_config.max_audio_sec,
+            input_device=self.runtime_config.input_device
+        )
         if start_error:
             self.set_error(start_error)
             self.tray_controller.show_message("Voz a Texto", start_error)
             return
 
-        self._replace_state(status=STATUS_RECORDING)
+        self.start_beep.play()
+        self._replace_state(
+            status=STATUS_RECORDING, error_message=None, current_transcript=""
+        )
 
     def _handle_hotkey_released(self):
         if self.shell_state.status != STATUS_RECORDING:
@@ -238,23 +339,23 @@ class DesktopShellController(QObject):
         capture_result = self.audio_capture_service.stop_recording()
         if capture_result.error_message:
             self.set_error(capture_result.error_message)
-            self.tray_controller.show_message("Voz a Texto", capture_result.error_message)
+            self.tray_controller.show_message(
+                "Voz a Texto", capture_result.error_message
+            )
             return
 
         if capture_result.too_long:
-            message = (
-                f"El audio supero el maximo de {self.runtime_config.max_audio_sec} segundos."
-            )
+            message = f"El audio supero el maximo de {self.runtime_config.max_audio_sec} segundos."
             self.set_error(message)
             self.tray_controller.show_message("Voz a Texto", message)
             return
 
         if not capture_result.audio_bytes:
-            self._replace_state(status=STATUS_READY)
+            self._replace_state(status=STATUS_READY, error_message=None)
             return
 
         model_id = self.runtime_config.model_id
-        self._replace_state(status=STATUS_PROCESSING)
+        self._replace_state(status=STATUS_PROCESSING, error_message=None)
         worker = threading.Thread(
             target=self._run_transcription,
             args=(capture_result.audio_bytes, model_id),
@@ -264,7 +365,9 @@ class DesktopShellController(QObject):
 
     def _run_transcription(self, audio_bytes, model_id):
         try:
-            text = self.model_manager.transcribe_bytes(audio_bytes, model_id=model_id).strip()
+            text = self.model_manager.transcribe_bytes(
+                audio_bytes, model_id=model_id, language=self.runtime_config.language
+            ).strip()
         except Exception as exc:
             self.transcription_signals.failed.emit(f"Error transcribiendo: {exc}")
             return
@@ -287,12 +390,14 @@ class DesktopShellController(QObject):
                             extra_state={
                                 "status": STATUS_READY,
                                 "last_transcript": next_transcript,
+                                "current_transcript": text,
                             },
                         )
                     else:
                         self._replace_state(
                             status=STATUS_READY,
                             last_transcript=next_transcript,
+                            current_transcript=text,
                             error_message=str(exc),
                         )
                         self.tray_controller.show_message("Voz a Texto", str(exc))
@@ -302,6 +407,7 @@ class DesktopShellController(QObject):
                     self._replace_state(
                         status=STATUS_READY,
                         last_transcript=next_transcript,
+                        current_transcript=text,
                         error_message=message,
                     )
                     self.tray_controller.show_message("Voz a Texto", message)
@@ -310,12 +416,13 @@ class DesktopShellController(QObject):
             self._replace_state(
                 status=STATUS_READY,
                 last_transcript=next_transcript,
+                current_transcript=text,
                 error_message=None,
             )
-            self.tray_controller.show_message("Voz a Texto", "Transcripcion completada.")
+            self.complete_beep.play()
             return
 
-        self._replace_state(status=STATUS_READY, error_message=None)
+        self._replace_state(status=STATUS_READY, current_transcript="", error_message=None)
 
     def _handle_transcription_failed(self, message):
         self.set_error(message)
@@ -374,13 +481,17 @@ class DesktopShellController(QObject):
         self.model_manager.runtime_config = self.runtime_config
 
         if context["persist_config"]:
-            self.app_config = replace(self.app_config, active_model=context["model_key"])
+            self.app_config = replace(
+                self.app_config, active_model=context["model_key"]
+            )
             self._persist_config()
 
+        downloaded = self._check_downloaded_models()
         self._replace_state(
             status=STATUS_READY,
             active_model=context["model_key"],
             error_message=None,
+            downloaded_models=downloaded,
         )
 
         if context["announce_success"]:
@@ -420,18 +531,28 @@ class DesktopShellController(QObject):
             self.transcript_store.export_to_file(target_path)
         except (OSError, ValueError) as exc:
             self._replace_state(error_message=f"No se pudo exportar el texto: {exc}")
-            self.tray_controller.show_message("Voz a Texto", "No se pudo exportar la transcripcion.")
+            self.tray_controller.show_message(
+                "Voz a Texto", "No se pudo exportar la transcripcion."
+            )
             return
 
         self._replace_state(error_message=None)
-        self.tray_controller.show_message("Voz a Texto", "Transcripcion exportada correctamente.")
+        self.tray_controller.show_message(
+            "Voz a Texto", "Transcripcion exportada correctamente."
+        )
+
+    def _clear_transcript(self):
+        self.transcript_store.clear()
+        self._replace_state(last_transcript="", error_message=None)
 
     def _persist_config(self):
         save_app_config(self.app_config, self.config_path)
 
     def _sync_native_typing_enabled(self, is_enabled, persist_config):
         self.app_config = replace(self.app_config, native_typing_enabled=is_enabled)
-        self.runtime_config = replace(self.runtime_config, native_typing_enabled=is_enabled)
+        self.runtime_config = replace(
+            self.runtime_config, native_typing_enabled=is_enabled
+        )
         self.model_manager.runtime_config = self.runtime_config
         if persist_config:
             self._persist_config()
@@ -464,7 +585,10 @@ class DesktopShellController(QObject):
             self._disable_native_typing(environment_error, persist_config=True)
 
     def _disable_native_typing(self, message, persist_config, extra_state=None):
-        if self.runtime_config.native_typing_enabled or self.app_config.native_typing_enabled:
+        if (
+            self.runtime_config.native_typing_enabled
+            or self.app_config.native_typing_enabled
+        ):
             self._sync_native_typing_enabled(False, persist_config=persist_config)
 
         changes = {
@@ -476,7 +600,43 @@ class DesktopShellController(QObject):
         self._replace_state(**changes)
         self.tray_controller.show_message("Voz a Texto", message)
 
-    def _replace_state(self, **changes):
+    def _replace_state(
+        self,
+        status=None,
+        active_model=None,
+        native_typing_enabled=None,
+        hotkey=None,
+        launch_at_login=None,
+        language=None,
+        input_device=None,
+        last_transcript=None,
+        current_transcript=None,
+        error_message=None,
+        downloaded_models=None,
+    ):
+        changes = {}
+        if status is not None:
+            changes["status"] = status
+        if active_model is not None:
+            changes["active_model"] = active_model
+        if native_typing_enabled is not None:
+            changes["native_typing_enabled"] = native_typing_enabled
+        if hotkey is not None:
+            changes["hotkey"] = hotkey
+        if launch_at_login is not None:
+            changes["launch_at_login"] = launch_at_login
+        if language is not None:
+            changes["language"] = language
+        if input_device is not None:
+            changes["input_device"] = input_device
+        if last_transcript is not None:
+            changes["last_transcript"] = last_transcript
+        if current_transcript is not None:
+            changes["current_transcript"] = current_transcript
+        if error_message is not None:
+            changes["error_message"] = error_message
+        if downloaded_models is not None:
+            changes["downloaded_models"] = downloaded_models
         self.shell_state = replace(self.shell_state, **changes)
         self._apply_state()
 

@@ -7,7 +7,6 @@ from .single_instance import SingleInstanceGuard
 from PySide6.QtCore import QDir, QTimer
 from PySide6.QtNetwork import QLocalSocket
 from pathlib import Path
-import sys
 
 
 def main(argv=None):

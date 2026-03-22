@@ -42,6 +42,8 @@ class AppConfig:
     native_typing_enabled: bool = True
     hotkey: str = DEFAULT_HOTKEY
     launch_at_login: bool = False
+    language: str = "auto"
+    input_device: str | None = None
 
     @classmethod
     def from_dict(cls, payload=None):
@@ -53,6 +55,8 @@ class AppConfig:
             native_typing_enabled=read_bool(data.get("native_typing_enabled"), True),
             hotkey=hotkey,
             launch_at_login=read_bool(data.get("launch_at_login"), False),
+            language=read_non_empty_string(data.get("language")) or "auto",
+            input_device=read_non_empty_string(data.get("input_device")),
         )
 
 
@@ -64,6 +68,8 @@ class RuntimeConfig:
     native_typing_enabled: bool
     hotkey: str
     launch_at_login: bool
+    language: str
+    input_device: str | None
     used_legacy_model_env: bool = False
     used_legacy_max_audio_env: bool = False
 
@@ -135,6 +141,8 @@ def resolve_runtime_config(env=None, stored_config=None):
         native_typing_enabled=base_config.native_typing_enabled,
         hotkey=base_config.hotkey,
         launch_at_login=base_config.launch_at_login,
+        language=base_config.language,
+        input_device=base_config.input_device,
         used_legacy_model_env=not model_id_from_current_env and bool(model_id_from_legacy_env),
         used_legacy_max_audio_env=max_audio_from_current_env is None and max_audio_from_legacy_env is not None,
     )

@@ -1,4 +1,4 @@
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Qt
 from PySide6.QtGui import QAction, QActionGroup, QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
 import os
@@ -25,24 +25,27 @@ class TrayController(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        
+
         icon_path = os.path.join(base_dir, "assets", "icon.png")
         tray_idle_path = os.path.join(base_dir, "assets", "tray_idle.png")
         tray_recording_path = os.path.join(base_dir, "assets", "tray_recording.png")
         tray_processing_path = os.path.join(base_dir, "assets", "tray_processing.png")
-        
-        self.cached_pixmaps = {
-            "idle": QPixmap(tray_idle_path) if os.path.exists(tray_idle_path) else QApplication.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume).pixmap(32, 32),
-            "recording": QPixmap(tray_recording_path) if os.path.exists(tray_recording_path) else None,
-            "processing": QPixmap(tray_processing_path) if os.path.exists(tray_processing_path) else None
+
+        self.icon_paths = {
+            "idle": tray_idle_path,
+            "recording": tray_recording_path,
+            "processing": tray_processing_path,
         }
-        
+        self._current_icon_key = None
+
         if os.path.exists(tray_idle_path):
-            tray_icon = QIcon(self.cached_pixmaps["idle"])
+            tray_icon = QIcon(tray_idle_path)
             if parent and os.path.exists(icon_path):
                 parent.setWindowIcon(QIcon(icon_path))
         else:
-            tray_icon = QIcon(self.cached_pixmaps["idle"])
+            tray_icon = QApplication.style().standardIcon(
+                QStyle.StandardPixmap.SP_MediaVolume
+            )
 
         self.tray_icon = QSystemTrayIcon(tray_icon, parent)
         self.menu = QMenu()
@@ -100,22 +103,39 @@ class TrayController(QObject):
         self.status_action.setText(f"Estado: {label}")
         self.tray_icon.setToolTip(f"Voz a Texto - {label}")
         self.export_action.setEnabled(shell_state.can_export)
-        self._set_checkable_action(self.native_typing_action, shell_state.native_typing_enabled)
+        self._set_checkable_action(
+            self.native_typing_action, shell_state.native_typing_enabled
+        )
         self._set_checkable_action(self.autostart_action, shell_state.launch_at_login)
         models_enabled = shell_state.status != STATUS_LOADING
-        
+
         if shell_state.status == STATUS_RECORDING:
             icon_key = "recording"
         elif shell_state.status in (STATUS_PROCESSING, STATUS_LOADING):
             icon_key = "processing"
         else:
             icon_key = "idle"
-            
-        pixmap = self.cached_pixmaps.get(icon_key)
-        if pixmap and not pixmap.isNull():
-            # Forzamos una nueva instancia de QIcon para saltar la cache inactiva de DBus en Linux
-            self.tray_icon.setIcon(QIcon(pixmap))
-            
+
+        icon_path = self.icon_paths.get(icon_key)
+        if icon_path and os.path.exists(icon_path):
+            with open(icon_path, "rb") as f:
+                data = f.read()
+            pixmap = QPixmap()
+            pixmap.loadFromData(data)
+            if not pixmap.isNull():
+                self.tray_icon.setIcon(QIcon(pixmap))
+                self._current_icon_key = icon_key
+            else:
+                self.tray_icon.setIcon(
+                    QApplication.style().standardIcon(
+                        QStyle.StandardPixmap.SP_MediaVolume
+                    )
+                )
+        else:
+            self.tray_icon.setIcon(
+                QApplication.style().standardIcon(QStyle.StandardPixmap.SP_MediaVolume)
+            )
+
         for action in self.model_actions.values():
             action.setEnabled(models_enabled)
 

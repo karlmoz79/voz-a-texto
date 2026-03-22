@@ -41,7 +41,9 @@ class AutostartService:
     ):
         self._env = os.environ if env is None else env
         self._platform_name = platform_name or sys.platform
-        self._autostart_dir = Path(autostart_dir) if autostart_dir else default_autostart_dir(self._env)
+        self._autostart_dir = (
+            Path(autostart_dir) if autostart_dir else default_autostart_dir(self._env)
+        )
         backend_root = Path(__file__).resolve().parents[2]
         self._python_executable = (
             Path(python_executable) if python_executable else Path(sys.executable)
@@ -52,7 +54,9 @@ class AutostartService:
             else backend_root / "scripts" / "desktop_app.py"
         ).resolve()
         self._launcher_executable = (
-            Path(launcher_executable) if launcher_executable else default_launcher_path(self._env)
+            Path(launcher_executable)
+            if launcher_executable
+            else default_launcher_path(self._env)
         ).expanduser()
 
     @property
@@ -76,17 +80,21 @@ class AutostartService:
             self._autostart_dir.mkdir(parents=True, exist_ok=True)
             self.entry_path.write_text(self.render_desktop_entry(), encoding="utf-8")
         except OSError as exc:
-            raise AutostartError(f"No se pudo escribir el archivo de autostart: {exc}") from exc
+            raise AutostartError(
+                f"No se pudo escribir el archivo de autostart: {exc}"
+            ) from exc
 
         return self.entry_path
 
     def disable(self):
+        if not self.entry_path.exists():
+            return
         try:
             self.entry_path.unlink()
-        except FileNotFoundError:
-            return
         except OSError as exc:
-            raise AutostartError(f"No se pudo eliminar el archivo de autostart: {exc}") from exc
+            raise AutostartError(
+                f"No se pudo eliminar el archivo de autostart: {exc}"
+            ) from exc
 
     def render_desktop_entry(self):
         exec_command = self.build_exec_command()

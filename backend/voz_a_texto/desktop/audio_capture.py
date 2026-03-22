@@ -45,6 +45,18 @@ class RecordingBuffer:
         return b"".join(self._chunks)
 
 
+def get_input_devices():
+    try:
+        import sounddevice as sd
+        devices = []
+        for i, d in enumerate(sd.query_devices()):
+            if d['max_input_channels'] > 0:
+                devices.append(d['name'])
+        return devices
+    except Exception:
+        return []
+
+
 class AudioCaptureService:
     def __init__(self, sample_rate=TARGET_SAMPLE_RATE, blocksize=DEFAULT_BLOCKSIZE):
         self.sample_rate = sample_rate
@@ -59,7 +71,11 @@ class AudioCaptureService:
     def is_recording(self):
         return self._recording
 
-    def start_recording(self, max_audio_sec):
+    @property
+    def current_level(self):
+        return self._current_level
+
+    def start_recording(self, max_audio_sec, input_device=None):
         if self._recording:
             return None
 
@@ -68,13 +84,25 @@ class AudioCaptureService:
         buffer = RecordingBuffer(max_audio_sec=max_audio_sec, sample_rate=self.sample_rate)
         self._buffer = buffer
         self._last_error = None
+        self._current_level = 0.0
 
         def callback(indata, _frames, _time, status):
             with self._lock:
                 if status and self._last_error is None:
                     self._last_error = str(status)
                 if self._buffer is not None:
-                    self._buffer.append(bytes(indata))
+                    chunk = bytes(indata)
+                    self._buffer.append(chunk)
+                    
+                    # Calculate simple RMS for UI visualization (0.0 to 1.0)
+                    import struct
+                    import math
+                    shorts = struct.unpack('h' * (len(chunk) // 2), chunk)
+                    # Use a small sample to save CPU, or the whole buffer
+                    rms = math.sqrt(sum(x*x for x in shorts) / max(1, len(shorts)))
+                    # Max raw value for int16 is 32768
+                    level = min(1.0, rms / 32768.0 * 10) # Multiply by 10 to make it visually responsive
+                    self._current_level = level
 
         try:
             stream = sd.RawInputStream(
@@ -83,6 +111,7 @@ class AudioCaptureService:
                 dtype="int16",
                 blocksize=self.blocksize,
                 callback=callback,
+                device=input_device
             )
             stream.start()
         except Exception as exc:

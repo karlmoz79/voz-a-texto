@@ -1,7 +1,7 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Voz a Texto
+Name=VoxFlow
 Comment=Aplicación local de dictado con atajo rápido
 Exec=/home/karlmoz/Documentos/voz-a-texto/backend/.venv/bin/python /home/karlmoz/Documentos/voz-a-texto/backend/scripts/desktop_app.py --ui
 Icon=/home/karlmoz/Documentos/voz-a-texto/backend/assets/icon.png

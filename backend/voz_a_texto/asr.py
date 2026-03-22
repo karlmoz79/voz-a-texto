@@ -29,22 +29,71 @@ def normalize_transcription(transcription):
     return str(transcription)
 
 
-def load_pretrained_model(model_id):
+def is_model_downloaded(model_id):
     if model_id in ("tiny", "base", "small", "medium", "large-v1", "large-v2", "large-v3"):
+        repo_id = f"Systran/faster-whisper-{model_id}"
+    else:
+        repo_id = model_id
+    
+    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+    folder_name = "models--" + repo_id.replace("/", "--")
+    folder_path = os.path.join(cache_dir, folder_name)
+    
+    return os.path.exists(folder_path)
+
+
+def delete_model_cache(model_id):
+    import shutil
+    if model_id in ("tiny", "base", "small", "medium", "large-v1", "large-v2", "large-v3"):
+        repo_id = f"Systran/faster-whisper-{model_id}"
+    else:
+        repo_id = model_id
+    
+    cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+    folder_name = "models--" + repo_id.replace("/", "--")
+    folder_path = os.path.join(cache_dir, folder_name)
+    
+    if os.path.exists(folder_path):
+        shutil.rmtree(folder_path)
+        return True
+    return False
+
+
+def load_pretrained_model(model_id):
+    if model_id in (
+        "tiny",
+        "base",
+        "small",
+        "medium",
+        "large-v1",
+        "large-v2",
+        "large-v3",
+    ):
         from faster_whisper import WhisperModel
-        
+
         threads = os.cpu_count() or 4
-        model = WhisperModel(model_id, device="cpu", compute_type="int8", cpu_threads=threads)
-        
+        num_workers = min(2, threads)
+        model = WhisperModel(
+            model_id,
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=threads,
+            num_workers=num_workers,
+        )
+
         class FasterWhisperWrapper:
             def __init__(self, wm):
                 self.wm = wm
-            
-            def transcribe(self, paths):
+
+            def transcribe(self, paths, **kwargs):
                 results = []
                 for path in paths:
-                    segments, _ = self.wm.transcribe(path, beam_size=5, condition_on_previous_text=False)
-                    text = " ".join([segment.text.strip() for segment in segments]).strip()
+                    segments, _ = self.wm.transcribe(
+                        path, beam_size=5, condition_on_previous_text=False, **kwargs
+                    )
+                    text = " ".join(
+                        [segment.text.strip() for segment in segments]
+                    ).strip()
                     results.append(text)
                 return results
 
@@ -53,12 +102,13 @@ def load_pretrained_model(model_id):
     import torch
     from nemo.collections.asr.models import ASRModel
 
+    torch.set_num_threads(os.cpu_count() or 4)
+    torch.set_grad_enabled(False)
     model = ASRModel.from_pretrained(model_id)
     model.eval()
 
     if not torch.cuda.is_available():
-        torch.set_num_threads(os.cpu_count() or 4)
-        torch.set_grad_enabled(False)
+        pass  # threads ya configurados arriba
 
     return model
 
@@ -117,11 +167,18 @@ class ModelManager:
             self.last_error = None
             return self._model
 
+    def unload_model(self):
+        with self._lock:
+            self._model = None
+            self._loaded_model_id = None
+            self.state = MODEL_STATE_IDLE
+            self.last_error = None
+
     def transcribe_base64(self, audio_base64, model_id=None):
         audio_bytes = base64.b64decode(audio_base64)
         return self.transcribe_bytes(audio_bytes, model_id=model_id)
 
-    def transcribe_bytes(self, audio_bytes, model_id=None):
+    def transcribe_bytes(self, audio_bytes, model_id=None, language=None):
         if not audio_bytes:
             return ""
 
@@ -136,7 +193,16 @@ class ModelManager:
                 wav_file.setframerate(16000)
                 wav_file.writeframes(audio_bytes)
 
-            transcription = model.transcribe([temp_path])
+            kwargs = {}
+            if language and language != "auto":
+                kwargs["language"] = language
+
+            try:
+                transcription = model.transcribe([temp_path], **kwargs)
+            except TypeError:
+                # Fallback for models like NeMo that do not accept kwargs
+                transcription = model.transcribe([temp_path])
+                
             return normalize_transcription(transcription)
         finally:
             if os.path.exists(temp_path):

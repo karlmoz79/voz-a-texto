@@ -15,4 +15,5 @@ dependencies = [
     "sounddevice>=0.5.1",
     "torch>=2.0.0",
     "faster-whisper>=1.2.1",
+    "qtvscodestyle>=0.1.1",
 ]

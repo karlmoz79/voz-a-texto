@@ -23,7 +23,9 @@ class NativeTypingService:
         which=None,
         timeout_sec=5,
     ):
-        self.command = command or os.environ.get("NATIVE_TYPE_CMD") or DEFAULT_NATIVE_TYPE_CMD
+        self.command = (
+            command or os.environ.get("NATIVE_TYPE_CMD") or DEFAULT_NATIVE_TYPE_CMD
+        )
         self._env = os.environ if env is None else env
         self._platform_name = platform_name or sys.platform
         self._runner = runner or subprocess.run
@@ -82,7 +84,9 @@ class NativeTypingService:
             )
 
         display = self._read_env("DISPLAY")
-        session_type = self._read_env("XDG_SESSION_TYPE").lower()
+        session_type_raw = self._read_env("XDG_SESSION_TYPE")
+        session_type = session_type_raw.lower() if session_type_raw else None
+
         if not display:
             if session_type == "wayland":
                 raise NativeTypingError(
@@ -107,7 +111,9 @@ class NativeTypingService:
             default_message="No hay una ventana enfocada compatible para dictado nativo.",
         )
         if not result.stdout.strip():
-            raise NativeTypingError("No hay una ventana enfocada compatible para dictado nativo.")
+            raise NativeTypingError(
+                "No hay una ventana enfocada compatible para dictado nativo."
+            )
 
     def _run_command(self, args, default_message):
         try:
@@ -124,9 +130,13 @@ class NativeTypingService:
                 disable_feature=True,
             ) from None
         except subprocess.TimeoutExpired:
-            raise NativeTypingError("El comando de dictado nativo no respondio a tiempo.") from None
+            raise NativeTypingError(
+                "El comando de dictado nativo no respondio a tiempo."
+            ) from None
         except OSError as exc:
-            raise NativeTypingError(f"No se pudo ejecutar `{self.command}`: {exc}") from exc
+            raise NativeTypingError(
+                f"No se pudo ejecutar `{self.command}`: {exc}"
+            ) from exc
 
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip()
