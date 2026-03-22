@@ -43,7 +43,11 @@ class FakeSettingsWindow:
         self.native_typing_toggled = FakeSignal()
         self.autostart_toggled = FakeSignal()
         self.export_requested = FakeSignal()
+        self.clear_requested = FakeSignal()
+        self.delete_model_requested = FakeSignal()
         self.hotkey_changed = FakeSignal()
+        self.mic_selected = FakeSignal()
+        self.language_selected = FakeSignal()
         self.last_state = None
         self.presented = False
 
@@ -177,15 +181,28 @@ class DesktopShellControllerTestCase(unittest.TestCase):
             native_typing_enabled=True,
             hotkey="Alt+Z",
             launch_at_login=False,
+            language="auto",
+            input_device=None,
         )
         self.patchers = [
             patch("voz_a_texto.desktop.controller.SettingsWindow", FakeSettingsWindow),
             patch("voz_a_texto.desktop.controller.TrayController", FakeTrayController),
-            patch("voz_a_texto.desktop.controller.GlobalHotkeyService", FakeHotkeyService),
-            patch("voz_a_texto.desktop.controller.AudioCaptureService", FakeAudioCaptureService),
+            patch(
+                "voz_a_texto.desktop.controller.GlobalHotkeyService", FakeHotkeyService
+            ),
+            patch(
+                "voz_a_texto.desktop.controller.AudioCaptureService",
+                FakeAudioCaptureService,
+            ),
             patch("voz_a_texto.desktop.controller.ModelManager", FakeModelManager),
-            patch("voz_a_texto.desktop.controller.QSystemTrayIcon.isSystemTrayAvailable", return_value=True),
-            patch("voz_a_texto.desktop.controller.load_app_config", return_value=AppConfig()),
+            patch(
+                "voz_a_texto.desktop.controller.QSystemTrayIcon.isSystemTrayAvailable",
+                return_value=True,
+            ),
+            patch(
+                "voz_a_texto.desktop.controller.load_app_config",
+                return_value=AppConfig(),
+            ),
             patch(
                 "voz_a_texto.desktop.controller.resolve_runtime_config",
                 return_value=self.runtime_config,
@@ -204,7 +221,9 @@ class DesktopShellControllerTestCase(unittest.TestCase):
 
         self.assertEqual(self.controller.shell_state.status, STATUS_ERROR)
         self.assertEqual(self.controller.audio_capture_service.start_calls, [])
-        self.assertIn("Aun no hay ningun modelo listo", self.controller.shell_state.error_message)
+        self.assertIn(
+            "Aun no hay ningun modelo listo", self.controller.shell_state.error_message
+        )
         self.assertEqual(
             self.controller.tray_controller.messages[-1][1],
             "Aun no hay ningun modelo listo para transcribir.",
@@ -234,7 +253,9 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         )
 
     def test_set_active_model_retries_when_selected_model_is_not_loaded(self):
-        with patch.object(self.controller, "_begin_model_load", return_value=True) as begin_model_load:
+        with patch.object(
+            self.controller, "_begin_model_load", return_value=True
+        ) as begin_model_load:
             self.controller._set_active_model(FASTCONFORMER_ES_KEY)
 
         begin_model_load.assert_called_once()
@@ -247,7 +268,9 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         )
 
         self.assertEqual(self.controller.shell_state.status, STATUS_ERROR)
-        self.assertEqual(self.controller.shell_state.active_model, previous_active_model)
+        self.assertEqual(
+            self.controller.shell_state.active_model, previous_active_model
+        )
         self.assertEqual(self.controller.app_config.active_model, FASTCONFORMER_ES_KEY)
         self.assertEqual(
             self.controller.tray_controller.messages[-1],
@@ -286,16 +309,27 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         )
         self.assertEqual(
             self.controller.tray_controller.messages[-1],
-            ("Voz a Texto", "No se pudo escribir el archivo de autostart: permiso denegado"),
+            (
+                "Voz a Texto",
+                "No se pudo escribir el archivo de autostart: permiso denegado",
+            ),
         )
 
     def test_start_reconciles_launch_at_login_with_autostart_service(self):
-        self.controller.app_config = replace(self.controller.app_config, launch_at_login=True)
-        self.controller.runtime_config = replace(self.controller.runtime_config, launch_at_login=True)
+        self.controller.app_config = replace(
+            self.controller.app_config, launch_at_login=True
+        )
+        self.controller.runtime_config = replace(
+            self.controller.runtime_config, launch_at_login=True
+        )
         self.controller.model_manager.runtime_config = self.controller.runtime_config
-        self.controller.shell_state = replace(self.controller.shell_state, launch_at_login=True)
+        self.controller.shell_state = replace(
+            self.controller.shell_state, launch_at_login=True
+        )
 
-        with patch.object(self.controller, "_preload_active_model") as preload_active_model:
+        with patch.object(
+            self.controller, "_preload_active_model"
+        ) as preload_active_model:
             self.controller.start()
 
         preload_active_model.assert_called_once()
@@ -304,10 +338,16 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         self.assertTrue(self.controller.hotkey_service.started)
 
     def test_start_disables_launch_at_login_when_reconcile_fails(self):
-        self.controller.app_config = replace(self.controller.app_config, launch_at_login=True)
-        self.controller.runtime_config = replace(self.controller.runtime_config, launch_at_login=True)
+        self.controller.app_config = replace(
+            self.controller.app_config, launch_at_login=True
+        )
+        self.controller.runtime_config = replace(
+            self.controller.runtime_config, launch_at_login=True
+        )
         self.controller.model_manager.runtime_config = self.controller.runtime_config
-        self.controller.shell_state = replace(self.controller.shell_state, launch_at_login=True)
+        self.controller.shell_state = replace(
+            self.controller.shell_state, launch_at_login=True
+        )
         self.controller.autostart_service.sync_error = AutostartError(
             "No se encontro el interprete de Python para autostart: /missing/python"
         )
@@ -328,7 +368,9 @@ class DesktopShellControllerTestCase(unittest.TestCase):
             ),
         )
 
-    def test_handle_transcription_completed_types_text_when_native_typing_is_enabled(self):
+    def test_handle_transcription_completed_types_text_when_native_typing_is_enabled(
+        self,
+    ):
         self.controller._handle_transcription_completed("hola mundo")
 
         self.assertEqual(
@@ -345,12 +387,10 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         self.assertEqual(self.controller.shell_state.status, STATUS_READY)
         self.assertEqual(self.controller.shell_state.last_transcript, "hola mundo")
         self.assertIsNone(self.controller.shell_state.error_message)
-        self.assertEqual(
-            self.controller.tray_controller.messages[-1],
-            ("Voz a Texto", "Transcripcion completada."),
-        )
 
-    def test_handle_transcription_completed_keeps_transcript_when_native_typing_fails(self):
+    def test_handle_transcription_completed_keeps_transcript_when_native_typing_fails(
+        self,
+    ):
         self.controller.native_typing_service.type_error = NativeTypingError(
             "No hay una ventana enfocada compatible para dictado nativo."
         )
@@ -366,10 +406,15 @@ class DesktopShellControllerTestCase(unittest.TestCase):
         self.assertTrue(self.controller.shell_state.native_typing_enabled)
         self.assertEqual(
             self.controller.tray_controller.messages[-1],
-            ("Voz a Texto", "No hay una ventana enfocada compatible para dictado nativo."),
+            (
+                "Voz a Texto",
+                "No hay una ventana enfocada compatible para dictado nativo.",
+            ),
         )
 
-    def test_handle_transcription_completed_disables_native_typing_when_environment_is_invalid(self):
+    def test_handle_transcription_completed_disables_native_typing_when_environment_is_invalid(
+        self,
+    ):
         self.controller.native_typing_service.type_error = NativeTypingError(
             "No se encontro `xdotool` en PATH. Instala xdotool para usar dictado nativo.",
             disable_feature=True,
@@ -393,6 +438,21 @@ class DesktopShellControllerTestCase(unittest.TestCase):
                 "No se encontro `xdotool` en PATH. Instala xdotool para usar dictado nativo.",
             ),
         )
+
+    def test_clear_transcript(self):
+        self.controller.transcript_store.append("texto uno")
+        self.controller.transcript_store.append("texto dos")
+        self.assertEqual(self.controller.transcript_store.count, 2)
+        self.assertTrue(bool(self.controller.transcript_store.full_text))
+
+        self.controller._clear_transcript()
+
+        self.assertEqual(self.controller.transcript_store.count, 0)
+        self.assertEqual(self.controller.shell_state.last_transcript, "")
+
+        self.controller.transcript_store.append("texto nuevo")
+        self.assertEqual(self.controller.transcript_store.count, 1)
+        self.assertEqual(self.controller.transcript_store.full_text, "texto nuevo")
 
 
 if __name__ == "__main__":

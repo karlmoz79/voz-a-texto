@@ -33,6 +33,8 @@ class ModelManagerTestCase(unittest.TestCase):
                 native_typing_enabled=True,
                 hotkey="Alt+Z",
                 launch_at_login=False,
+                language="auto",
+                input_device=None,
             ),
             model_loader=fake_loader,
         )
@@ -53,6 +55,8 @@ class ModelManagerTestCase(unittest.TestCase):
                 native_typing_enabled=True,
                 hotkey="Alt+Z",
                 launch_at_login=False,
+                language="auto",
+                input_device=None,
             ),
             model_loader=lambda model_id: FakeModel(result_text=model_id),
         )
@@ -73,6 +77,8 @@ class ModelManagerTestCase(unittest.TestCase):
                 native_typing_enabled=True,
                 hotkey="Alt+Z",
                 launch_at_login=False,
+                language="auto",
+                input_device=None,
             ),
             model_loader=lambda _model_id: model,
         )
@@ -97,6 +103,8 @@ class ModelManagerTestCase(unittest.TestCase):
                 native_typing_enabled=True,
                 hotkey="Alt+Z",
                 launch_at_login=False,
+                language="auto",
+                input_device=None,
             ),
             model_loader=fake_loader,
         )

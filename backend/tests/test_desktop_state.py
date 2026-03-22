@@ -14,6 +14,8 @@ class DesktopStateTestCase(unittest.TestCase):
             native_typing_enabled=True,
             hotkey="Alt+Z",
             launch_at_login=False,
+            language="auto",
+            input_device=None,
         )
 
         shell_state = create_shell_state(runtime_config)
