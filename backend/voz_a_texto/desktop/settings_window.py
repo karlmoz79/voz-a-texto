@@ -443,7 +443,12 @@ class SettingsWindow(QWidget):
 
         self.lang_combo = CustomComboBox()
         self.lang_combo.addItems(["Auto-detectar", "Español", "Inglés"])
-        layout.addWidget(FormRow("Forzar Idioma (Whisper)", self.lang_combo))
+        self.lang_combo.setToolTip(
+            "⚠️ 'Auto-detectar' hace la transcripción mucho más lenta en CPU.\n"
+            "Se recomienda seleccionar un idioma fijo."
+        )
+        lang_tooltip = "Forzar un idioma evita la detección automática,\nque es muy lenta en CPU (puede tardar 10-20s extra)."
+        layout.addWidget(FormRow("Forzar Idioma (Whisper)", self.lang_combo, icon=lang_tooltip))
 
         self.native_typing_checkbox = ToggleSwitch()
         layout.addWidget(FormRow("Dictado Nativo", self.native_typing_checkbox))

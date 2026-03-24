@@ -7,7 +7,7 @@ from .models import find_model_key_by_id, get_model_profile, normalize_model_key
 
 APP_CONFIG_DIRNAME = "voz-a-texto"
 CONFIG_FILENAME = "config.json"
-DEFAULT_MAX_AUDIO_SEC = 30
+DEFAULT_MAX_AUDIO_SEC = 300
 DEFAULT_HOTKEY = "Ctrl+Space"
 
 
@@ -42,7 +42,7 @@ class AppConfig:
     native_typing_enabled: bool = True
     hotkey: str = DEFAULT_HOTKEY
     launch_at_login: bool = False
-    language: str = "auto"
+    language: str = "es"
     input_device: str | None = None
 
     @classmethod

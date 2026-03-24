@@ -81,6 +81,31 @@ def load_pretrained_model(model_id):
             num_workers=num_workers,
         )
 
+        def _warmup_whisper(wm):
+            """Warmup del modelo con audio silencioso para reducir latencia inicial."""
+            import numpy as np
+            import tempfile
+            import wave
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                # 1 segundo de audio silencioso a 16kHz
+                silence = np.zeros(16000, dtype=np.float32)
+                with wave.open(tmp_path, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(16000)
+                    wf.writeframes((silence * 32767).astype(np.int16).tobytes())
+                wm.transcribe(tmp_path, beam_size=1, vad_filter=True, language="es")
+            except Exception:
+                pass
+            finally:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+
+        _warmup_whisper(model)
+
         class FasterWhisperWrapper:
             def __init__(self, wm):
                 self.wm = wm
@@ -89,7 +114,7 @@ def load_pretrained_model(model_id):
                 results = []
                 for path in paths:
                     segments, _ = self.wm.transcribe(
-                        path, beam_size=5, condition_on_previous_text=False, **kwargs
+                        path, beam_size=1, condition_on_previous_text=False, vad_filter=True, **kwargs
                     )
                     text = " ".join(
                         [segment.text.strip() for segment in segments]

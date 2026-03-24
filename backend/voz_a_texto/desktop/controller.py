@@ -372,10 +372,7 @@ class DesktopShellController(QObject):
             return
 
         if capture_result.too_long:
-            message = f"El audio supero el maximo de {self.runtime_config.max_audio_sec} segundos."
-            self.set_error(message)
-            self.tray_controller.show_message(APP_DISPLAY_NAME, message)
-            return
+            self.tray_controller.show_message(APP_DISPLAY_NAME, f"Aviso: Se alcanzo el limite de {self.runtime_config.max_audio_sec}s. Transcribiendo lo capturado...")
 
         if not capture_result.audio_bytes:
             self.recording_popup.hide()
