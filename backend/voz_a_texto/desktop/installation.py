@@ -21,7 +21,9 @@ def _escape_desktop_arg(value):
     escaped = escaped.replace('"', '\\"')
     escaped = escaped.replace("$", "\\$")
     escaped = escaped.replace("`", "\\`")
-    return f'"{escaped}"'
+    if " " in escaped:
+        return f'"{escaped}"'
+    return escaped
 
 
 class DesktopInstallationError(RuntimeError):
@@ -137,6 +139,7 @@ class DesktopInstallationService:
     def render_application_entry(self):
         launcher_path = self.launcher_path
         escaped_launcher = _escape_desktop_arg(str(launcher_path))
+        icon_path = self.installed_backend_root / "assets" / "icon.png"
         return (
             "[Desktop Entry]\n"
             "Type=Application\n"
@@ -144,10 +147,10 @@ class DesktopInstallationService:
             f"Name={APP_DISPLAY_NAME}\n"
             f"Comment=Shell desktop local de {APP_DISPLAY_NAME}\n"
             f"TryExec={escaped_launcher}\n"
-            f"Exec={escaped_launcher}\n"
+            f"Exec={escaped_launcher} --ui\n"
             "Terminal=false\n"
             "StartupNotify=false\n"
-            "Icon=audio-input-microphone\n"
+            f"Icon={icon_path}\n"
             "Categories=Utility;AudioVideo;\n"
         )
 
@@ -192,6 +195,11 @@ class DesktopInstallationService:
             target_backend_root / "voz_a_texto",
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
         )
+        if (self._source_backend_root / "assets").exists():
+            shutil.copytree(
+                self._source_backend_root / "assets",
+                target_backend_root / "assets",
+            )
 
     def _run_uv_sync(self, uv_path, backend_root):
         try:
